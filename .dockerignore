@@ -1,0 +1,6 @@
+.git
+.env
+.env.test
+uploads/
+*_test.go
+cutmax-server

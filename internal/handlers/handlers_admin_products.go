@@ -1,0 +1,145 @@
+package handlers
+
+import (
+	"fmt"
+	"log"
+	"net/http"
+	"strings"
+
+	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
+
+	"github.com/cutmax/cutmax-backend/internal/db"
+	"github.com/cutmax/cutmax-backend/internal/util"
+)
+
+// ===== Admin Products CRUD =====
+
+func HandleAdminProducts(w http.ResponseWriter, r *http.Request) {
+	if r.Method == "POST" {
+		createProduct(w, r)
+		return
+	}
+	q := r.URL.Query()
+	id := q.Get("id")
+	if id != "" {
+		var p db.ProductRow
+		err := db.Pool.QueryRow(r.Context(),
+			`SELECT id,sku,name,category,sub_category,brand,description,price,stock,unit,image_url,image_type,featured,active,sort_order,created_at,updated_at FROM products WHERE id=$1`, id,
+		).Scan(&p.ID, &p.SKU, &p.Name, &p.Category, &p.SubCategory, &p.Brand, &p.Description, &p.Price, &p.Stock, &p.Unit, &p.ImageURL, &p.ImageType, &p.Featured, &p.Active, &p.SortOrder, &p.CreatedAt, &p.UpdatedAt)
+		if err != nil {
+			util.JsonOK(w, 200, map[string]interface{}{"product": nil})
+			return
+		}
+		util.JsonOK(w, 200, map[string]interface{}{"product": p})
+		return
+	}
+
+	where := "1=1"
+	args := []interface{}{}
+	idx := 1
+	active := q.Get("active")
+	if active == "true" {
+		where += fmt.Sprintf(" AND p.active=$%d", idx)
+		args = append(args, true)
+		idx++
+	} else if active == "false" {
+		where += fmt.Sprintf(" AND p.active=$%d", idx)
+		args = append(args, false)
+		idx++
+	}
+	if v := q.Get("q"); v != "" {
+		where += fmt.Sprintf(" AND (p.name ILIKE '%%'||$%d||'%%' OR p.sku ILIKE '%%'||$%d||'%%')", idx, idx)
+		args = append(args, v)
+		idx++
+	}
+	if v := q.Get("category"); v != "" {
+		where += fmt.Sprintf(" AND p.category=$%d", idx)
+		args = append(args, v)
+		idx++
+	}
+	if v := q.Get("sub_category"); v != "" {
+		where += fmt.Sprintf(" AND p.sub_category=$%d", idx)
+		args = append(args, v)
+		idx++
+	}
+	if v := q.Get("brand"); v != "" {
+		where += fmt.Sprintf(" AND p.brand=$%d", idx)
+		args = append(args, v)
+		idx++
+	}
+
+	page := util.Atoi(q.Get("page"), 1)
+	perPage := util.Atoi(q.Get("per_page"), 50)
+	offset := (page - 1) * perPage
+
+	var total int
+	db.Pool.QueryRow(r.Context(), "SELECT COUNT(*) FROM products p WHERE "+where, args...).Scan(&total)
+	query := fmt.Sprintf(`SELECT id,sku,name,category,sub_category,brand,description,price,stock,unit,image_url,image_type,featured,active,sort_order,created_at,updated_at FROM products p WHERE %s ORDER BY p.created_at DESC LIMIT $%d OFFSET $%d`, where, idx, idx+1)
+	args = append(args, perPage, offset)
+	products := db.QueryProducts(r.Context(), query, args...)
+	util.JsonOK(w, 200, map[string]interface{}{"products": products, "total": total, "page": page, "per_page": perPage})
+}
+
+func createProduct(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		SKU, Name, Category, SubCategory, Brand, Description string
+		Price                                                float64
+		Stock                                                int
+		Unit                                                 string
+		Featured                                             bool
+		SortOrder                                            int
+	}
+	if err := util.Decode(r, &input); err != nil || input.SKU == "" || input.Name == "" {
+		util.JsonErr(w, 400, "SKU, name, category and price required")
+		return
+	}
+	var pid string
+	pid = uuid.New().String()
+	_, err := db.Pool.Exec(r.Context(),
+		`INSERT INTO products (id,sku,name,category,sub_category,brand,description,price,stock,unit,featured,sort_order,created_at,updated_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,NOW(),NOW())`,
+		pid, input.SKU, input.Name, input.Category, input.SubCategory, util.OrDef(input.Brand, "CUT-STOCK"), input.Description,
+		input.Price, input.Stock, util.OrDef(input.Unit, "NOS"), input.Featured, input.SortOrder,
+	)
+	if err != nil {
+		log.Printf("[admin] create product error: %v", err)
+		if strings.Contains(err.Error(), "unique") {
+			util.JsonErr(w, 409, "SKU already exists")
+			return
+		}
+		util.JsonErr(w, 500, "Failed to create product")
+		return
+	}
+	util.JsonOK(w, 201, map[string]interface{}{
+		"product": map[string]interface{}{"id": pid, "sku": input.SKU, "name": input.Name, "category": input.Category, "subCategory": input.SubCategory},
+	})
+}
+
+func HandleAdminProduct(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	if r.Method == "PUT" {
+		var input map[string]interface{}
+		if err := util.Decode(r, &input); err != nil {
+			util.JsonErr(w, 400, "Invalid JSON")
+			return
+		}
+		if sku, ok := input["sku"].(string); ok && sku != "" {
+			var exists bool
+			db.Pool.QueryRow(r.Context(), "SELECT EXISTS(SELECT 1 FROM products WHERE sku=$1 AND id!=$2)", sku, id).Scan(&exists)
+			if exists {
+				util.JsonErr(w, 409, "SKU already exists")
+				return
+			}
+		}
+		db.Pool.Exec(r.Context(), "UPDATE products SET updated_at=NOW() WHERE id=$1", id)
+		util.JsonOK(w, 200, map[string]interface{}{"message": "Product updated"})
+		return
+	}
+	if r.Method == "DELETE" {
+		db.Pool.Exec(r.Context(), "UPDATE products SET active=false, updated_at=NOW() WHERE id=$1", id)
+		util.JsonOK(w, 200, map[string]interface{}{"message": "Product deactivated"})
+		return
+	}
+	util.JsonErr(w, 405, "Method not allowed")
+}

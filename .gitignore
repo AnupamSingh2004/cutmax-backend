@@ -1,0 +1,13 @@
+# Binary
+cutmax-server
+
+# Secrets
+.env
+
+# Uploads (runtime data)
+uploads/
+
+# IDE
+.idea/
+.vscode/
+*.swp
