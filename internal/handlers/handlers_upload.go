@@ -14,6 +14,7 @@ import (
 
 	"github.com/cutmax/cutmax-backend/internal/config"
 	"github.com/cutmax/cutmax-backend/internal/db"
+	"github.com/cutmax/cutmax-backend/internal/storage"
 	"github.com/cutmax/cutmax-backend/internal/util"
 )
 
@@ -30,7 +31,7 @@ func HandleAdminUpload(w http.ResponseWriter, r *http.Request) {
 	defer file.Close()
 
 	data, _ := io.ReadAll(file)
-	_, ext, ok := sniffFile(data)
+	mime, ext, ok := sniffFile(data)
 	if !ok {
 		util.JsonErr(w, 422, "Unsupported image type (jpeg/png/webp/gif only)")
 		return
@@ -45,16 +46,15 @@ func HandleAdminUpload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	key := buildKey(sku, ext)
-	url, err := saveFile(key, data)
+	url, err := storage.Active.Save(r.Context(), key, data, mime)
 	if err != nil {
 		util.JsonErr(w, 500, err.Error())
 		return
 	}
 
 	if oldURL != nil && *oldURL != "" {
-		oldKey := keyFromURL(*oldURL)
-		if oldKey != "" {
-			os.Remove(filepath.Join(config.Cfg.UploadsDir, oldKey))
+		if oldKey := keyFromURL(*oldURL); oldKey != "" {
+			storage.Active.Delete(r.Context(), oldKey)
 		}
 	}
 
@@ -116,19 +116,15 @@ func buildKey(sku, ext string) string {
 	return fmt.Sprintf("%s_%x.%s", safe, b, ext)
 }
 
-func saveFile(key string, data []byte) (string, error) {
-	os.MkdirAll(config.Cfg.UploadsDir, 0755)
-	target := filepath.Join(config.Cfg.UploadsDir, key)
-	if err := os.WriteFile(target, data, 0644); err != nil {
-		return "", err
-	}
-	return config.Cfg.UploadsPublicBaseURL + "/" + key, nil
-}
-
+// keyFromURL recovers the storage key from a previously-saved public URL, so
+// the old file can be deleted when a product's image is replaced. Checks
+// both bases since a product's existing image may have been saved under
+// either driver if STORAGE_DRIVER was ever switched.
 func keyFromURL(url string) string {
-	base := config.Cfg.UploadsPublicBaseURL
-	if !strings.HasPrefix(url, base) {
-		return ""
+	for _, base := range []string{config.Cfg.S3PublicBaseURL, config.Cfg.UploadsPublicBaseURL} {
+		if base != "" && strings.HasPrefix(url, base) {
+			return strings.TrimPrefix(strings.TrimPrefix(url, base), "/")
+		}
 	}
-	return strings.TrimPrefix(strings.TrimPrefix(url, base), "/")
+	return ""
 }

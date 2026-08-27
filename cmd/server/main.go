@@ -15,6 +15,7 @@ import (
 	"github.com/cutmax/cutmax-backend/internal/config"
 	"github.com/cutmax/cutmax-backend/internal/db"
 	"github.com/cutmax/cutmax-backend/internal/router"
+	"github.com/cutmax/cutmax-backend/internal/storage"
 )
 
 func main() {
@@ -43,6 +44,14 @@ func main() {
 
 	// Ensure uploads dir
 	os.MkdirAll(config.Cfg.UploadsDir, 0755)
+
+	// Build storage backend (local disk or S3/R2, per STORAGE_DRIVER)
+	active, err := storage.New()
+	if err != nil {
+		log.Fatalf("storage: %v", err)
+	}
+	storage.Active = active
+	log.Printf("storage driver: %s", config.Cfg.StorageDriver)
 
 	// Build router
 	r := router.New()

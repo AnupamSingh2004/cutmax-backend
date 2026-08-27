@@ -18,6 +18,13 @@ type Config struct {
 	UploadsDir           string
 	UploadsPublicBaseURL string
 	MaxUploadMB          int
+	StorageDriver        string
+	S3Endpoint           string
+	S3Region             string
+	S3Bucket             string
+	S3AccessKeyID        string
+	S3SecretAccessKey    string
+	S3PublicBaseURL      string
 	EmailProvider        string
 	SMTPHost             string
 	SMTPPort             int
@@ -41,6 +48,13 @@ func LoadConfig() error {
 		UploadsDir:           envOr("UPLOADS_DIR", "./uploads"),
 		UploadsPublicBaseURL: envOr("UPLOADS_PUBLIC_BASE_URL", "http://localhost:3000/api/uploads"),
 		MaxUploadMB:          envIntOr("MAX_UPLOAD_MB", 5),
+		StorageDriver:        envOr("STORAGE_DRIVER", "local"),
+		S3Endpoint:           env("S3_ENDPOINT"),
+		S3Region:             envOr("S3_REGION", "auto"),
+		S3Bucket:             env("S3_BUCKET"),
+		S3AccessKeyID:        env("S3_ACCESS_KEY_ID"),
+		S3SecretAccessKey:    env("S3_SECRET_ACCESS_KEY"),
+		S3PublicBaseURL:      env("S3_PUBLIC_BASE_URL"),
 		EmailProvider:        envOr("EMAIL_PROVIDER", "smtp"),
 		SMTPHost:             envOr("SMTP_HOST", "localhost"),
 		SMTPPort:             envIntOr("SMTP_PORT", 1025),
@@ -56,6 +70,13 @@ func LoadConfig() error {
 	}
 	if len(Cfg.AllowedOrigins) == 0 {
 		return fmt.Errorf("ALLOWED_ORIGINS is required")
+	}
+	if Cfg.StorageDriver == "s3" {
+		if Cfg.S3Endpoint == "" || Cfg.S3Bucket == "" || Cfg.S3AccessKeyID == "" || Cfg.S3SecretAccessKey == "" || Cfg.S3PublicBaseURL == "" {
+			return fmt.Errorf("STORAGE_DRIVER=s3 requires S3_ENDPOINT, S3_BUCKET, S3_ACCESS_KEY_ID, S3_SECRET_ACCESS_KEY, S3_PUBLIC_BASE_URL")
+		}
+	} else if Cfg.StorageDriver != "local" {
+		return fmt.Errorf("STORAGE_DRIVER must be 'local' or 's3', got %q", Cfg.StorageDriver)
 	}
 	return nil
 }

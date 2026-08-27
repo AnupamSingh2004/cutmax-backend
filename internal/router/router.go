@@ -97,6 +97,12 @@ func New() http.Handler {
 			r.Use(middleware.RateLimit(middleware.RLImageUpload))
 			r.Post("/api/admin/uploads", handlers.HandleAdminUpload)
 		})
+		r.Get("/api/admin/media", handlers.HandleAdminMediaList)
+		r.Delete("/api/admin/media/{id}", handlers.HandleAdminMediaDelete)
+		r.Group(func(r chi.Router) {
+			r.Use(middleware.RateLimit(middleware.RLImageUpload))
+			r.Post("/api/admin/media", handlers.HandleAdminMediaUpload)
+		})
 	})
 
 	// Serve uploads

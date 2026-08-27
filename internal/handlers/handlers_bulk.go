@@ -3,8 +3,6 @@ package handlers
 import (
 	"io"
 	"net/http"
-	"os"
-	"path/filepath"
 	"strconv"
 
 	"github.com/jackc/pgx/v5"
@@ -12,6 +10,7 @@ import (
 
 	"github.com/cutmax/cutmax-backend/internal/config"
 	"github.com/cutmax/cutmax-backend/internal/db"
+	"github.com/cutmax/cutmax-backend/internal/storage"
 	"github.com/cutmax/cutmax-backend/internal/util"
 )
 
@@ -144,14 +143,14 @@ func HandleBulkImages(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		_, ext, ok := sniffFile(data)
+		mime, ext, ok := sniffFile(data)
 		if !ok {
 			errors = append(errors, map[string]string{"filename": fh.Filename, "error": "Unsupported file type"})
 			continue
 		}
 
 		key := buildKey(product.SKU, ext)
-		url, err := saveFile(key, data)
+		url, err := storage.Active.Save(r.Context(), key, data, mime)
 		if err != nil {
 			errors = append(errors, map[string]string{"filename": fh.Filename, "error": err.Error()})
 			continue
@@ -161,9 +160,8 @@ func HandleBulkImages(w http.ResponseWriter, r *http.Request) {
 		var oldURL *string
 		db.Pool.QueryRow(r.Context(), "SELECT image_url FROM products WHERE id=$1", product.ID).Scan(&oldURL)
 		if oldURL != nil && *oldURL != "" {
-			oldKey := keyFromURL(*oldURL)
-			if oldKey != "" {
-				os.Remove(filepath.Join(config.Cfg.UploadsDir, oldKey))
+			if oldKey := keyFromURL(*oldURL); oldKey != "" {
+				storage.Active.Delete(r.Context(), oldKey)
 			}
 		}
 

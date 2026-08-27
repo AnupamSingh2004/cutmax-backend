@@ -112,12 +112,17 @@ func HandleListProducts(w http.ResponseWriter, r *http.Request) {
 	db.Pool.QueryRow(r.Context(), "SELECT COALESCE(value::float,18) FROM settings WHERE key='gst_percent'").Scan(&gstRate)
 	var whatsapp string
 	db.Pool.QueryRow(r.Context(), "SELECT COALESCE(value,'') FROM settings WHERE key='whatsapp'").Scan(&whatsapp)
+	var heroVideoURL string
+	db.Pool.QueryRow(r.Context(), "SELECT COALESCE(value,'') FROM settings WHERE key='hero_video_url'").Scan(&heroVideoURL)
+	var bgVideoURL string
+	db.Pool.QueryRow(r.Context(), "SELECT COALESCE(value,'') FROM settings WHERE key='site_background_video_url'").Scan(&bgVideoURL)
 
 	util.JsonOK(w, 200, map[string]interface{}{
 		"products": products, "total": total, "page": page, "per_page": perPage,
 		"categories": cats, "subCategories": subCats, "brands": brands,
 		"settings": map[string]interface{}{
 			"whatsapp": whatsapp, "gst_percent": gstRate, "low_stock": lowStock,
+			"hero_video_url": heroVideoURL, "site_background_video_url": bgVideoURL,
 		},
 	})
 }

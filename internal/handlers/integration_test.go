@@ -15,6 +15,7 @@ import (
 	"github.com/cutmax/cutmax-backend/internal/config"
 	"github.com/cutmax/cutmax-backend/internal/db"
 	"github.com/cutmax/cutmax-backend/internal/router"
+	"github.com/cutmax/cutmax-backend/internal/storage"
 )
 
 // ===== Integration test setup =====
@@ -30,6 +31,7 @@ func setupTestConfig(t *testing.T) {
 		UploadsDir:           "./test-uploads",
 		UploadsPublicBaseURL: "http://localhost:3000/api/uploads",
 		MaxUploadMB:          5,
+		StorageDriver:        "local",
 		EmailProvider:        "smtp",
 		SMTPHost:             "localhost",
 		SMTPPort:             1025,
@@ -37,6 +39,11 @@ func setupTestConfig(t *testing.T) {
 		NodeEnv:              "development",
 		Port:                 3000,
 	}
+	active, err := storage.New()
+	if err != nil {
+		t.Fatalf("storage.New: %v", err)
+	}
+	storage.Active = active
 }
 
 func envOrDefault(key, def string) string {
