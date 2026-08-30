@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/cutmax/cutmax-backend/internal/db"
+	"github.com/cutmax/cutmax-backend/internal/middleware"
 	"github.com/cutmax/cutmax-backend/internal/util"
 )
 
@@ -111,6 +112,7 @@ func createProduct(w http.ResponseWriter, r *http.Request) {
 		util.JsonErr(w, 500, "Failed to create product")
 		return
 	}
+	middleware.CacheDelPattern(r.Context(), "cache:products:*")
 	util.JsonOK(w, 201, map[string]interface{}{
 		"product": map[string]interface{}{"id": pid, "sku": input.SKU, "name": input.Name, "category": input.Category, "subCategory": input.SubCategory},
 	})
@@ -133,11 +135,13 @@ func HandleAdminProduct(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		db.Pool.Exec(r.Context(), "UPDATE products SET updated_at=NOW() WHERE id=$1", id)
+		middleware.CacheDelPattern(r.Context(), "cache:products:*")
 		util.JsonOK(w, 200, map[string]interface{}{"message": "Product updated"})
 		return
 	}
 	if r.Method == "DELETE" {
 		db.Pool.Exec(r.Context(), "UPDATE products SET active=false, updated_at=NOW() WHERE id=$1", id)
+		middleware.CacheDelPattern(r.Context(), "cache:products:*")
 		util.JsonOK(w, 200, map[string]interface{}{"message": "Product deactivated"})
 		return
 	}

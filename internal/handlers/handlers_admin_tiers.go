@@ -6,6 +6,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/cutmax/cutmax-backend/internal/db"
+	"github.com/cutmax/cutmax-backend/internal/middleware"
 	"github.com/cutmax/cutmax-backend/internal/util"
 )
 
@@ -27,6 +28,7 @@ func HandleAdminTiers(w http.ResponseWriter, r *http.Request) {
 			`INSERT INTO price_tiers (label,min_qty,discount_percent,active,created_at,updated_at) VALUES ($1,$2,$3,true,NOW(),NOW()) RETURNING id`,
 			input.Label, input.MinQty, input.Discount,
 		).Scan(&tid)
+		middleware.CacheDelPattern(r.Context(), "cache:tiers:*")
 		util.JsonOK(w, 201, map[string]interface{}{"tier": map[string]interface{}{"id": tid}})
 		return
 	}
@@ -52,11 +54,13 @@ func HandleAdminTier(w http.ResponseWriter, r *http.Request) {
 		}
 		util.Decode(r, &input)
 		db.Pool.Exec(r.Context(), "UPDATE price_tiers SET label=$1,min_qty=$2,discount_percent=$3,active=$4,updated_at=NOW() WHERE id=$5", input.Label, input.MinQty, input.Discount, input.Active, id)
+		middleware.CacheDelPattern(r.Context(), "cache:tiers:*")
 		util.JsonOK(w, 200, map[string]interface{}{"message": "Tier updated"})
 		return
 	}
 	if r.Method == "DELETE" {
 		db.Pool.Exec(r.Context(), "DELETE FROM price_tiers WHERE id=$1", id)
+		middleware.CacheDelPattern(r.Context(), "cache:tiers:*")
 		util.JsonOK(w, 200, map[string]interface{}{"message": "Tier deleted"})
 		return
 	}

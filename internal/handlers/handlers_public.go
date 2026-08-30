@@ -1,9 +1,11 @@
 package handlers
 
 import (
+	"encoding/json"
 	"fmt"
 	"math/rand"
 	"net/http"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -12,6 +14,25 @@ import (
 	"github.com/cutmax/cutmax-backend/internal/middleware"
 	"github.com/cutmax/cutmax-backend/internal/util"
 )
+
+// writeCached serves a value from cache, or marshals+caches+serves a fresh one.
+func writeCached(w http.ResponseWriter, r *http.Request, key string, ttl time.Duration, build func() map[string]interface{}) {
+	if cached, ok := middleware.CacheGet(r.Context(), key); ok {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(cached))
+		return
+	}
+	data := build()
+	data["success"] = true
+	b, err := json.Marshal(data)
+	if err != nil {
+		util.JsonOK(w, 200, data)
+		return
+	}
+	middleware.CacheSet(r.Context(), key, string(b), ttl)
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(b)
+}
 
 // ===== CSRF Endpoint =====
 
@@ -44,6 +65,12 @@ func HandleHealth(w http.ResponseWriter, r *http.Request) {
 // ===== Public Products =====
 
 func HandleListProducts(w http.ResponseWriter, r *http.Request) {
+	writeCached(w, r, "cache:products:list:"+r.URL.RawQuery, 60*time.Second, func() map[string]interface{} {
+		return buildProductList(r)
+	})
+}
+
+func buildProductList(r *http.Request) map[string]interface{} {
 	q := r.URL.Query()
 	where := "p.active = true"
 	args := []interface{}{}
@@ -117,18 +144,25 @@ func HandleListProducts(w http.ResponseWriter, r *http.Request) {
 	var bgVideoURL string
 	db.Pool.QueryRow(r.Context(), "SELECT COALESCE(value,'') FROM settings WHERE key='site_background_video_url'").Scan(&bgVideoURL)
 
-	util.JsonOK(w, 200, map[string]interface{}{
+	return map[string]interface{}{
 		"products": products, "total": total, "page": page, "per_page": perPage,
 		"categories": cats, "subCategories": subCats, "brands": brands,
 		"settings": map[string]interface{}{
 			"whatsapp": whatsapp, "gst_percent": gstRate, "low_stock": lowStock,
 			"hero_video_url": heroVideoURL, "site_background_video_url": bgVideoURL,
 		},
-	})
+	}
 }
 
 func HandleGetProduct(w http.ResponseWriter, r *http.Request) {
 	sku := chi.URLParam(r, "sku")
+	cacheKey := "cache:products:sku:" + sku
+	if cached, ok := middleware.CacheGet(r.Context(), cacheKey); ok {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(cached))
+		return
+	}
+
 	var p db.ProductRow
 	err := db.Pool.QueryRow(r.Context(),
 		`SELECT id,sku,name,category,sub_category,brand,description,price,stock,unit,image_url,image_type,featured,active,sort_order,created_at,updated_at
@@ -140,19 +174,30 @@ func HandleGetProduct(w http.ResponseWriter, r *http.Request) {
 	}
 	tiers := db.QueryActiveTiers(r.Context())
 	related := db.QueryRelated(r.Context(), p.Category, p.SubCategory, p.ID)
-	util.JsonOK(w, 200, map[string]interface{}{"product": p, "tiers": tiers, "related": related})
+
+	data := map[string]interface{}{"product": p, "tiers": tiers, "related": related, "success": true}
+	b, err := json.Marshal(data)
+	if err != nil {
+		util.JsonOK(w, 200, data)
+		return
+	}
+	middleware.CacheSet(r.Context(), cacheKey, string(b), 120*time.Second)
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(b)
 }
 
 // ===== Public Price Tiers =====
 
 func HandleListTiers(w http.ResponseWriter, r *http.Request) {
-	rows, _ := db.Pool.Query(r.Context(), "SELECT id,label,min_qty,discount_percent,active,created_at,updated_at FROM price_tiers WHERE active = true ORDER BY min_qty ASC")
-	defer rows.Close()
-	var tiers []db.PriceTierRow
-	for rows.Next() {
-		var t db.PriceTierRow
-		rows.Scan(&t.ID, &t.Label, &t.MinQty, &t.DiscountPercent, &t.Active, &t.CreatedAt, &t.UpdatedAt)
-		tiers = append(tiers, t)
-	}
-	util.JsonOK(w, 200, map[string]interface{}{"tiers": tiers})
+	writeCached(w, r, "cache:tiers:list", 300*time.Second, func() map[string]interface{} {
+		rows, _ := db.Pool.Query(r.Context(), "SELECT id,label,min_qty,discount_percent,active,created_at,updated_at FROM price_tiers WHERE active = true ORDER BY min_qty ASC")
+		defer rows.Close()
+		var tiers []db.PriceTierRow
+		for rows.Next() {
+			var t db.PriceTierRow
+			rows.Scan(&t.ID, &t.Label, &t.MinQty, &t.DiscountPercent, &t.Active, &t.CreatedAt, &t.UpdatedAt)
+			tiers = append(tiers, t)
+		}
+		return map[string]interface{}{"tiers": tiers}
+	})
 }

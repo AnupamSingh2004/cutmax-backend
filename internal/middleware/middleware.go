@@ -288,3 +288,34 @@ func redisClient() *redis.Client {
 	})
 	return rdbClient
 }
+
+// --- Response cache (public catalog reads) ---
+
+// CacheGet returns a previously cached JSON response body, if present.
+func CacheGet(ctx context.Context, key string) (string, bool) {
+	val, err := redisClient().Get(ctx, key).Result()
+	if err != nil {
+		return "", false
+	}
+	return val, true
+}
+
+// CacheSet stores a JSON response body under key for ttl.
+func CacheSet(ctx context.Context, key, value string, ttl time.Duration) {
+	redisClient().Set(ctx, key, value, ttl)
+}
+
+// CacheDelPattern removes every key matching a glob pattern (e.g. "cache:products:*").
+// Used to invalidate cached reads after an admin write, since cached keys are
+// per-query-string and there's no single key to target directly.
+func CacheDelPattern(ctx context.Context, pattern string) {
+	rdb := redisClient()
+	var keys []string
+	iter := rdb.Scan(ctx, 0, pattern, 0).Iterator()
+	for iter.Next(ctx) {
+		keys = append(keys, iter.Val())
+	}
+	if len(keys) > 0 {
+		rdb.Del(ctx, keys...)
+	}
+}
