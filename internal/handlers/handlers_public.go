@@ -91,6 +91,11 @@ func buildProductList(r *http.Request) map[string]interface{} {
 		args = append(args, v)
 		idx++
 	}
+	if v := q.Get("material"); v != "" {
+		where += fmt.Sprintf(" AND p.material = $%d", idx)
+		args = append(args, v)
+		idx++
+	}
 	if v := q.Get("q"); v != "" {
 		where += fmt.Sprintf(" AND (p.name ILIKE '%%'||$%d||'%%' OR p.sku ILIKE '%%'||$%d||'%%')", idx, idx)
 		args = append(args, v)
@@ -123,7 +128,7 @@ func buildProductList(r *http.Request) map[string]interface{} {
 	var total int
 	db.Pool.QueryRow(r.Context(), "SELECT COUNT(*) FROM products p WHERE "+where, args...).Scan(&total)
 
-	query := fmt.Sprintf(`SELECT id,sku,name,category,sub_category,brand,description,price,stock,unit,image_url,image_type,featured,active,sort_order,created_at,updated_at
+	query := fmt.Sprintf(`SELECT id,sku,name,category,sub_category,brand,description,price,stock,unit,image_url,image_type,featured,active,sort_order,material,created_at,updated_at
         FROM products p WHERE %s ORDER BY %s LIMIT $%d OFFSET $%d`, where, orderBy, idx, idx+1)
 	args = append(args, perPage, offset)
 
@@ -131,6 +136,7 @@ func buildProductList(r *http.Request) map[string]interface{} {
 	cats := db.QueryDistinct("SELECT DISTINCT category FROM products WHERE active = true")
 	subCats := db.QueryDistinct("SELECT DISTINCT sub_category FROM products WHERE active = true")
 	brands := db.QueryDistinct("SELECT DISTINCT brand FROM products WHERE active = true")
+	materials := db.QueryDistinct("SELECT DISTINCT material FROM products WHERE active = true AND material IS NOT NULL")
 
 	// Settings used by the frontend
 	var lowStock int
@@ -146,7 +152,7 @@ func buildProductList(r *http.Request) map[string]interface{} {
 
 	return map[string]interface{}{
 		"products": products, "total": total, "page": page, "per_page": perPage,
-		"categories": cats, "subCategories": subCats, "brands": brands,
+		"categories": cats, "subCategories": subCats, "brands": brands, "materials": materials,
 		"settings": map[string]interface{}{
 			"whatsapp": whatsapp, "gst_percent": gstRate, "low_stock": lowStock,
 			"hero_video_url": heroVideoURL, "site_background_video_url": bgVideoURL,
@@ -165,9 +171,9 @@ func HandleGetProduct(w http.ResponseWriter, r *http.Request) {
 
 	var p db.ProductRow
 	err := db.Pool.QueryRow(r.Context(),
-		`SELECT id,sku,name,category,sub_category,brand,description,price,stock,unit,image_url,image_type,featured,active,sort_order,created_at,updated_at
+		`SELECT id,sku,name,category,sub_category,brand,description,price,stock,unit,image_url,image_type,featured,active,sort_order,material,created_at,updated_at
          FROM products WHERE (sku = $1 OR id = $1) AND active = true`, sku,
-	).Scan(&p.ID, &p.SKU, &p.Name, &p.Category, &p.SubCategory, &p.Brand, &p.Description, &p.Price, &p.Stock, &p.Unit, &p.ImageURL, &p.ImageType, &p.Featured, &p.Active, &p.SortOrder, &p.CreatedAt, &p.UpdatedAt)
+	).Scan(&p.ID, &p.SKU, &p.Name, &p.Category, &p.SubCategory, &p.Brand, &p.Description, &p.Price, &p.Stock, &p.Unit, &p.ImageURL, &p.ImageType, &p.Featured, &p.Active, &p.SortOrder, &p.Material, &p.CreatedAt, &p.UpdatedAt)
 	if err != nil {
 		util.JsonErr(w, 404, "Product not found")
 		return

@@ -26,8 +26,8 @@ func HandleAdminProducts(w http.ResponseWriter, r *http.Request) {
 	if id != "" {
 		var p db.ProductRow
 		err := db.Pool.QueryRow(r.Context(),
-			`SELECT id,sku,name,category,sub_category,brand,description,price,stock,unit,image_url,image_type,featured,active,sort_order,created_at,updated_at FROM products WHERE id=$1`, id,
-		).Scan(&p.ID, &p.SKU, &p.Name, &p.Category, &p.SubCategory, &p.Brand, &p.Description, &p.Price, &p.Stock, &p.Unit, &p.ImageURL, &p.ImageType, &p.Featured, &p.Active, &p.SortOrder, &p.CreatedAt, &p.UpdatedAt)
+			`SELECT id,sku,name,category,sub_category,brand,description,price,stock,unit,image_url,image_type,featured,active,sort_order,material,created_at,updated_at FROM products WHERE id=$1`, id,
+		).Scan(&p.ID, &p.SKU, &p.Name, &p.Category, &p.SubCategory, &p.Brand, &p.Description, &p.Price, &p.Stock, &p.Unit, &p.ImageURL, &p.ImageType, &p.Featured, &p.Active, &p.SortOrder, &p.Material, &p.CreatedAt, &p.UpdatedAt)
 		if err != nil {
 			util.JsonOK(w, 200, map[string]interface{}{"product": nil})
 			return
@@ -76,7 +76,7 @@ func HandleAdminProducts(w http.ResponseWriter, r *http.Request) {
 
 	var total int
 	db.Pool.QueryRow(r.Context(), "SELECT COUNT(*) FROM products p WHERE "+where, args...).Scan(&total)
-	query := fmt.Sprintf(`SELECT id,sku,name,category,sub_category,brand,description,price,stock,unit,image_url,image_type,featured,active,sort_order,created_at,updated_at FROM products p WHERE %s ORDER BY p.created_at DESC LIMIT $%d OFFSET $%d`, where, idx, idx+1)
+	query := fmt.Sprintf(`SELECT id,sku,name,category,sub_category,brand,description,price,stock,unit,image_url,image_type,featured,active,sort_order,material,created_at,updated_at FROM products p WHERE %s ORDER BY p.created_at DESC LIMIT $%d OFFSET $%d`, where, idx, idx+1)
 	args = append(args, perPage, offset)
 	products := db.QueryProducts(r.Context(), query, args...)
 	util.JsonOK(w, 200, map[string]interface{}{"products": products, "total": total, "page": page, "per_page": perPage})
@@ -90,18 +90,23 @@ func createProduct(w http.ResponseWriter, r *http.Request) {
 		Unit                                                 string
 		Featured                                             bool
 		SortOrder                                            int
+		Material                                             string
 	}
 	if err := util.Decode(r, &input); err != nil || input.SKU == "" || input.Name == "" {
 		util.JsonErr(w, 400, "SKU, name, category and price required")
 		return
 	}
+	var material *string
+	if input.Material != "" {
+		material = &input.Material
+	}
 	var pid string
 	pid = uuid.New().String()
 	_, err := db.Pool.Exec(r.Context(),
-		`INSERT INTO products (id,sku,name,category,sub_category,brand,description,price,stock,unit,featured,sort_order,created_at,updated_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,NOW(),NOW())`,
+		`INSERT INTO products (id,sku,name,category,sub_category,brand,description,price,stock,unit,featured,sort_order,material,created_at,updated_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,NOW(),NOW())`,
 		pid, input.SKU, input.Name, input.Category, input.SubCategory, util.OrDef(input.Brand, "CUT-STOCK"), input.Description,
-		input.Price, input.Stock, util.OrDef(input.Unit, "NOS"), input.Featured, input.SortOrder,
+		input.Price, input.Stock, util.OrDef(input.Unit, "NOS"), input.Featured, input.SortOrder, material,
 	)
 	if err != nil {
 		log.Printf("[admin] create product error: %v", err)
@@ -134,7 +139,58 @@ func HandleAdminProduct(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		db.Pool.Exec(r.Context(), "UPDATE products SET updated_at=NOW() WHERE id=$1", id)
+
+		sets := []string{}
+		args := []interface{}{}
+		idx := 1
+		addSet := func(col string, val interface{}) {
+			sets = append(sets, fmt.Sprintf("%s=$%d", col, idx))
+			args = append(args, val)
+			idx++
+		}
+		if v, ok := input["sku"].(string); ok && v != "" {
+			addSet("sku", v)
+		}
+		if v, ok := input["name"].(string); ok && v != "" {
+			addSet("name", v)
+		}
+		if v, ok := input["category"].(string); ok && v != "" {
+			addSet("category", v)
+		}
+		if v, ok := input["subCategory"].(string); ok && v != "" {
+			addSet("sub_category", v)
+		}
+		if v, ok := input["brand"].(string); ok && v != "" {
+			addSet("brand", v)
+		}
+		if v, ok := input["description"].(string); ok {
+			addSet("description", v)
+		}
+		if v, ok := input["price"].(float64); ok {
+			addSet("price", v)
+		}
+		if v, ok := input["stock"].(float64); ok {
+			addSet("stock", int(v))
+		}
+		if v, ok := input["unit"].(string); ok && v != "" {
+			addSet("unit", v)
+		}
+		if v, ok := input["featured"].(bool); ok {
+			addSet("featured", v)
+		}
+		if v, ok := input["active"].(bool); ok {
+			addSet("active", v)
+		}
+		if v, ok := input["material"].(string); ok {
+			if v == "" {
+				addSet("material", nil)
+			} else {
+				addSet("material", v)
+			}
+		}
+		sets = append(sets, "updated_at=NOW()")
+		args = append(args, id)
+		db.Pool.Exec(r.Context(), fmt.Sprintf("UPDATE products SET %s WHERE id=$%d", strings.Join(sets, ","), idx), args...)
 		middleware.CacheDelPattern(r.Context(), "cache:products:*")
 		util.JsonOK(w, 200, map[string]interface{}{"message": "Product updated"})
 		return

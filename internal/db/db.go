@@ -31,6 +31,7 @@ type ProductRow struct {
 	Featured    bool      `json:"featured"`
 	Active      bool      `json:"active"`
 	SortOrder   int       `json:"sortOrder"`
+	Material    *string   `json:"material"`
 	CreatedAt   time.Time `json:"createdAt"`
 	UpdatedAt   time.Time `json:"updatedAt"`
 }
@@ -46,7 +47,7 @@ type PriceTierRow struct {
 }
 
 var scanProduct = func(row pgx.Row, p *ProductRow) error {
-	return row.Scan(&p.ID, &p.SKU, &p.Name, &p.Category, &p.SubCategory, &p.Brand, &p.Description, &p.Price, &p.Stock, &p.Unit, &p.ImageURL, &p.ImageType, &p.Featured, &p.Active, &p.SortOrder, &p.CreatedAt, &p.UpdatedAt)
+	return row.Scan(&p.ID, &p.SKU, &p.Name, &p.Category, &p.SubCategory, &p.Brand, &p.Description, &p.Price, &p.Stock, &p.Unit, &p.ImageURL, &p.ImageType, &p.Featured, &p.Active, &p.SortOrder, &p.Material, &p.CreatedAt, &p.UpdatedAt)
 }
 
 func QueryProducts(ctx context.Context, query string, args ...interface{}) []ProductRow {
@@ -58,7 +59,7 @@ func QueryProducts(ctx context.Context, query string, args ...interface{}) []Pro
 	var products []ProductRow
 	for rows.Next() {
 		var p ProductRow
-		rows.Scan(&p.ID, &p.SKU, &p.Name, &p.Category, &p.SubCategory, &p.Brand, &p.Description, &p.Price, &p.Stock, &p.Unit, &p.ImageURL, &p.ImageType, &p.Featured, &p.Active, &p.SortOrder, &p.CreatedAt, &p.UpdatedAt)
+		rows.Scan(&p.ID, &p.SKU, &p.Name, &p.Category, &p.SubCategory, &p.Brand, &p.Description, &p.Price, &p.Stock, &p.Unit, &p.ImageURL, &p.ImageType, &p.Featured, &p.Active, &p.SortOrder, &p.Material, &p.CreatedAt, &p.UpdatedAt)
 		products = append(products, p)
 	}
 	return products
@@ -90,20 +91,20 @@ func QueryActiveTiers(ctx context.Context) []PriceTierRow {
 
 func QueryRelated(ctx context.Context, category, subCategory, excludeID string) []ProductRow {
 	rows, _ := Pool.Query(ctx,
-		`SELECT id,sku,name,category,sub_category,brand,description,price,stock,unit,image_url,image_type,featured,active,sort_order,created_at,updated_at
+		`SELECT id,sku,name,category,sub_category,brand,description,price,stock,unit,image_url,image_type,featured,active,sort_order,material,created_at,updated_at
          FROM products WHERE active=true AND sub_category=$1 AND id!=$2 LIMIT 6`, subCategory, excludeID)
 	defer rows.Close()
 	var products []ProductRow
 	for rows.Next() {
 		var p ProductRow
-		rows.Scan(&p.ID, &p.SKU, &p.Name, &p.Category, &p.SubCategory, &p.Brand, &p.Description, &p.Price, &p.Stock, &p.Unit, &p.ImageURL, &p.ImageType, &p.Featured, &p.Active, &p.SortOrder, &p.CreatedAt, &p.UpdatedAt)
+		rows.Scan(&p.ID, &p.SKU, &p.Name, &p.Category, &p.SubCategory, &p.Brand, &p.Description, &p.Price, &p.Stock, &p.Unit, &p.ImageURL, &p.ImageType, &p.Featured, &p.Active, &p.SortOrder, &p.Material, &p.CreatedAt, &p.UpdatedAt)
 		products = append(products, p)
 	}
 	return products
 }
 
 func LoadActiveProducts(ctx context.Context) []ProductRow {
-	return QueryProducts(ctx, "SELECT id,sku,name,category,sub_category,brand,description,price,stock,unit,image_url,image_type,featured,active,sort_order,created_at,updated_at FROM products WHERE active=true")
+	return QueryProducts(ctx, "SELECT id,sku,name,category,sub_category,brand,description,price,stock,unit,image_url,image_type,featured,active,sort_order,material,created_at,updated_at FROM products WHERE active=true")
 }
 
 func MatchProductByFilename(filename string, products []ProductRow) *ProductRow {
