@@ -72,6 +72,7 @@ func New() http.Handler {
 		r.Post("/api/admin/products", handlers.HandleAdminProducts)
 		r.Put("/api/admin/products/{id}", handlers.HandleAdminProduct)
 		r.Delete("/api/admin/products/{id}", handlers.HandleAdminProduct)
+		r.Put("/api/admin/products/{id}/price-breaks", handlers.HandleAdminProductPriceBreaks)
 		r.Get("/api/admin/price-tiers", handlers.HandleAdminTiers)
 		r.Post("/api/admin/price-tiers", handlers.HandleAdminTiers)
 		r.Put("/api/admin/price-tiers/{id}", handlers.HandleAdminTier)

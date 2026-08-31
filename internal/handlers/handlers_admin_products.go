@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -26,13 +27,14 @@ func HandleAdminProducts(w http.ResponseWriter, r *http.Request) {
 	if id != "" {
 		var p db.ProductRow
 		err := db.Pool.QueryRow(r.Context(),
-			`SELECT id,sku,name,category,sub_category,brand,description,price,stock,unit,image_url,image_type,featured,active,sort_order,material,created_at,updated_at FROM products WHERE id=$1`, id,
-		).Scan(&p.ID, &p.SKU, &p.Name, &p.Category, &p.SubCategory, &p.Brand, &p.Description, &p.Price, &p.Stock, &p.Unit, &p.ImageURL, &p.ImageType, &p.Featured, &p.Active, &p.SortOrder, &p.Material, &p.CreatedAt, &p.UpdatedAt)
+			`SELECT id,sku,name,category,sub_category,brand,description,price,stock,unit,image_url,image_type,featured,active,sort_order,material,specifications,created_at,updated_at FROM products WHERE id=$1`, id,
+		).Scan(&p.ID, &p.SKU, &p.Name, &p.Category, &p.SubCategory, &p.Brand, &p.Description, &p.Price, &p.Stock, &p.Unit, &p.ImageURL, &p.ImageType, &p.Featured, &p.Active, &p.SortOrder, &p.Material, &p.Specifications, &p.CreatedAt, &p.UpdatedAt)
 		if err != nil {
 			util.JsonOK(w, 200, map[string]interface{}{"product": nil})
 			return
 		}
-		util.JsonOK(w, 200, map[string]interface{}{"product": p})
+		priceBreaks := db.QueryPriceBreaks(r.Context(), p.ID)
+		util.JsonOK(w, 200, map[string]interface{}{"product": p, "priceBreaks": priceBreaks})
 		return
 	}
 
@@ -69,6 +71,11 @@ func HandleAdminProducts(w http.ResponseWriter, r *http.Request) {
 		args = append(args, v)
 		idx++
 	}
+	if v := q.Get("material"); v != "" {
+		where += fmt.Sprintf(" AND p.material=$%d", idx)
+		args = append(args, v)
+		idx++
+	}
 
 	page := util.Atoi(q.Get("page"), 1)
 	perPage := util.Atoi(q.Get("per_page"), 50)
@@ -76,7 +83,7 @@ func HandleAdminProducts(w http.ResponseWriter, r *http.Request) {
 
 	var total int
 	db.Pool.QueryRow(r.Context(), "SELECT COUNT(*) FROM products p WHERE "+where, args...).Scan(&total)
-	query := fmt.Sprintf(`SELECT id,sku,name,category,sub_category,brand,description,price,stock,unit,image_url,image_type,featured,active,sort_order,material,created_at,updated_at FROM products p WHERE %s ORDER BY p.created_at DESC LIMIT $%d OFFSET $%d`, where, idx, idx+1)
+	query := fmt.Sprintf(`SELECT id,sku,name,category,sub_category,brand,description,price,stock,unit,image_url,image_type,featured,active,sort_order,material,specifications,created_at,updated_at FROM products p WHERE %s ORDER BY p.created_at DESC LIMIT $%d OFFSET $%d`, where, idx, idx+1)
 	args = append(args, perPage, offset)
 	products := db.QueryProducts(r.Context(), query, args...)
 	util.JsonOK(w, 200, map[string]interface{}{"products": products, "total": total, "page": page, "per_page": perPage})
@@ -91,6 +98,10 @@ func createProduct(w http.ResponseWriter, r *http.Request) {
 		Featured                                             bool
 		SortOrder                                            int
 		Material                                             string
+		Specifications                                       []struct {
+			Label string `json:"label"`
+			Value string `json:"value"`
+		}
 	}
 	if err := util.Decode(r, &input); err != nil || input.SKU == "" || input.Name == "" {
 		util.JsonErr(w, 400, "SKU, name, category and price required")
@@ -100,13 +111,14 @@ func createProduct(w http.ResponseWriter, r *http.Request) {
 	if input.Material != "" {
 		material = &input.Material
 	}
+	specsJSON, _ := json.Marshal(input.Specifications)
 	var pid string
 	pid = uuid.New().String()
 	_, err := db.Pool.Exec(r.Context(),
-		`INSERT INTO products (id,sku,name,category,sub_category,brand,description,price,stock,unit,featured,sort_order,material,created_at,updated_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,NOW(),NOW())`,
+		`INSERT INTO products (id,sku,name,category,sub_category,brand,description,price,stock,unit,featured,sort_order,material,specifications,created_at,updated_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14::jsonb,NOW(),NOW())`,
 		pid, input.SKU, input.Name, input.Category, input.SubCategory, util.OrDef(input.Brand, "CUT-STOCK"), input.Description,
-		input.Price, input.Stock, util.OrDef(input.Unit, "NOS"), input.Featured, input.SortOrder, material,
+		input.Price, input.Stock, util.OrDef(input.Unit, "NOS"), input.Featured, input.SortOrder, material, specsJSON,
 	)
 	if err != nil {
 		log.Printf("[admin] create product error: %v", err)
@@ -188,6 +200,12 @@ func HandleAdminProduct(w http.ResponseWriter, r *http.Request) {
 				addSet("material", v)
 			}
 		}
+		if v, ok := input["specifications"]; ok {
+			specsJSON, _ := json.Marshal(v)
+			sets = append(sets, fmt.Sprintf("specifications=$%d::jsonb", idx))
+			args = append(args, specsJSON)
+			idx++
+		}
 		sets = append(sets, "updated_at=NOW()")
 		args = append(args, id)
 		db.Pool.Exec(r.Context(), fmt.Sprintf("UPDATE products SET %s WHERE id=$%d", strings.Join(sets, ","), idx), args...)
@@ -202,4 +220,37 @@ func HandleAdminProduct(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	util.JsonErr(w, 405, "Method not allowed")
+}
+
+// ===== Admin Product Price Breaks (per-product volume pricing) =====
+
+func HandleAdminProductPriceBreaks(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	if r.Method != "PUT" {
+		util.JsonErr(w, 405, "Method not allowed")
+		return
+	}
+	var input struct {
+		Breaks []struct {
+			MinQty    int     `json:"minQty"`
+			UnitPrice float64 `json:"unitPrice"`
+		} `json:"breaks"`
+	}
+	if err := util.Decode(r, &input); err != nil {
+		util.JsonErr(w, 400, "Invalid JSON")
+		return
+	}
+	breaks := make([]db.PriceBreakRow, 0, len(input.Breaks))
+	for _, b := range input.Breaks {
+		if b.MinQty <= 0 || b.UnitPrice < 0 {
+			continue
+		}
+		breaks = append(breaks, db.PriceBreakRow{MinQty: b.MinQty, UnitPrice: b.UnitPrice})
+	}
+	if err := db.ReplacePriceBreaks(r.Context(), id, breaks); err != nil {
+		util.JsonErr(w, 500, "Failed to save price breaks")
+		return
+	}
+	middleware.CacheDelPattern(r.Context(), "cache:products:*")
+	util.JsonOK(w, 200, map[string]interface{}{"priceBreaks": db.QueryPriceBreaks(r.Context(), id)})
 }
