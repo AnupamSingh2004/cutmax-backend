@@ -59,7 +59,71 @@ func HandleAdminStats(w http.ResponseWriter, r *http.Request) {
 	db.Pool.QueryRow(r.Context(), "SELECT COUNT(*) FROM products WHERE active=true AND stock>0 AND stock<=$1", lowLimit).Scan(&k.LowStockCount)
 	db.Pool.QueryRow(r.Context(), "SELECT COUNT(*) FROM products WHERE active=true AND stock=0").Scan(&k.OutOfStockCount)
 
-	util.JsonOK(w, 200, map[string]interface{}{"kpis": k})
+	stockBySubCategory := []map[string]interface{}{}
+	rows, _ := db.Pool.Query(r.Context(),
+		"SELECT sub_category, COALESCE(SUM(stock),0) FROM products WHERE active=true GROUP BY sub_category ORDER BY 2 DESC LIMIT 12")
+	for rows.Next() {
+		var sub string
+		var stock int
+		rows.Scan(&sub, &stock)
+		stockBySubCategory = append(stockBySubCategory, map[string]interface{}{"subCategory": sub, "stock": stock})
+	}
+	rows.Close()
+
+	stockStatus := []map[string]interface{}{}
+	rows, _ = db.Pool.Query(r.Context(), `
+		SELECT
+			CASE WHEN stock=0 THEN 'Out of Stock' WHEN stock<=$1 THEN 'Low Stock' ELSE 'In Stock' END AS status,
+			COUNT(*), COALESCE(SUM(stock*price),0)::int
+		FROM products WHERE active=true GROUP BY 1`, lowLimit)
+	for rows.Next() {
+		var status string
+		var count, value int
+		rows.Scan(&status, &count, &value)
+		stockStatus = append(stockStatus, map[string]interface{}{"status": status, "count": count, "value": value})
+	}
+	rows.Close()
+
+	enquiriesOverTime := []map[string]interface{}{}
+	rows, _ = db.Pool.Query(r.Context(), `
+		SELECT to_char(d::date,'YYYY-MM-DD'), COUNT(e.id)
+		FROM generate_series(CURRENT_DATE - INTERVAL '29 days', CURRENT_DATE, INTERVAL '1 day') d
+		LEFT JOIN enquiries e ON e.created_at::date = d::date
+		GROUP BY d ORDER BY d`)
+	for rows.Next() {
+		var date string
+		var count int
+		rows.Scan(&date, &count)
+		enquiriesOverTime = append(enquiriesOverTime, map[string]interface{}{"date": date, "count": count})
+	}
+	rows.Close()
+
+	enquiryStatusBreakdown := []map[string]interface{}{}
+	rows, _ = db.Pool.Query(r.Context(), "SELECT status, COUNT(*) FROM enquiries GROUP BY status")
+	for rows.Next() {
+		var status string
+		var count int
+		rows.Scan(&status, &count)
+		enquiryStatusBreakdown = append(enquiryStatusBreakdown, map[string]interface{}{"status": status, "count": count})
+	}
+	rows.Close()
+
+	topProducts := []map[string]interface{}{}
+	rows, _ = db.Pool.Query(r.Context(), `
+		SELECT sku, name, COUNT(DISTINCT enquiry_id), COALESCE(SUM(qty),0)
+		FROM enquiry_items GROUP BY sku, name ORDER BY 3 DESC LIMIT 5`)
+	for rows.Next() {
+		var sku, name string
+		var enquiryCount, totalQty int
+		rows.Scan(&sku, &name, &enquiryCount, &totalQty)
+		topProducts = append(topProducts, map[string]interface{}{"sku": sku, "name": name, "enquiryCount": enquiryCount, "totalQty": totalQty})
+	}
+	rows.Close()
+
+	util.JsonOK(w, 200, map[string]interface{}{
+		"kpis": k, "stockBySubCategory": stockBySubCategory, "stockStatus": stockStatus,
+		"enquiriesOverTime": enquiriesOverTime, "enquiryStatusBreakdown": enquiryStatusBreakdown, "topProducts": topProducts,
+	})
 }
 
 // ===== Admin Audit =====
