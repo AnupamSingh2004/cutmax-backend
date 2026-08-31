@@ -43,7 +43,7 @@ func HandleAdminLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	db.Pool.Exec(r.Context(), "UPDATE admin_users SET failed_attempts=0, locked_until=NULL, last_login=NOW() WHERE id=$1", admin.ID)
-	token, exp, _ := middleware.SignJWT(map[string]interface{}{"sub": admin.ID, "email": admin.Email, "name": admin.Name, "role": admin.Role}, config.Cfg.AdminJWTSecret, 30*time.Minute)
+	token, exp, _ := middleware.SignJWT(map[string]interface{}{"sub": admin.ID, "email": admin.Email, "name": admin.Name, "role": admin.Role}, config.Cfg.AdminJWTSecret, 8*time.Hour)
 	middleware.SetCookie(w, "cutmax_admin", token, exp)
 	util.JsonOK(w, 200, map[string]interface{}{
 		"admin": map[string]interface{}{"id": admin.ID, "email": admin.Email, "name": admin.Name, "role": admin.Role},

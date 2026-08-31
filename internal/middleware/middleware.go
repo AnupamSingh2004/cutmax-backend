@@ -181,8 +181,8 @@ func RequireAdmin(next http.Handler) http.Handler {
 			http.Error(w, `{"success":false,"error":"Invalid session"}`, http.StatusUnauthorized)
 			return
 		}
-		// Rolling 30-min idle timeout
-		token, exp, _ := SignJWT(claims, config.Cfg.AdminJWTSecret, 30*time.Minute)
+		// Rolling 8-hour idle timeout
+		token, exp, _ := SignJWT(claims, config.Cfg.AdminJWTSecret, 8*time.Hour)
 		SetCookie(w, "cutmax_admin", token, exp)
 
 		ctx := context.WithValue(r.Context(), AdminIDKey, claims["sub"])
