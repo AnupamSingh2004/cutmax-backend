@@ -98,10 +98,10 @@ var scanProduct = func(row pgx.Row, p *ProductRow) error {
 func QueryProducts(ctx context.Context, query string, args ...interface{}) []ProductRow {
 	rows, err := Pool.Query(ctx, query, args...)
 	if err != nil {
-		return nil
+		return []ProductRow{}
 	}
 	defer rows.Close()
-	var products []ProductRow
+	products := []ProductRow{}
 	for rows.Next() {
 		var p ProductRow
 		rows.Scan(&p.ID, &p.SKU, &p.Name, &p.Category, &p.SubCategory, &p.Brand, &p.Description, &p.Price, &p.Stock, &p.Unit, &p.ImageURL, &p.ImageType, &p.Featured, &p.Active, &p.SortOrder, &p.Material, &p.Specifications, &p.CreatedAt, &p.UpdatedAt)
@@ -113,7 +113,7 @@ func QueryProducts(ctx context.Context, query string, args ...interface{}) []Pro
 func QueryDistinct(q string) []string {
 	rows, _ := Pool.Query(context.Background(), q)
 	defer rows.Close()
-	var out []string
+	out := []string{}
 	for rows.Next() {
 		var s string
 		rows.Scan(&s)
@@ -125,7 +125,7 @@ func QueryDistinct(q string) []string {
 func QueryActiveTiers(ctx context.Context) []PriceTierRow {
 	rows, _ := Pool.Query(ctx, "SELECT id,label,min_qty,discount_percent,active,created_at,updated_at FROM price_tiers WHERE active=true ORDER BY min_qty")
 	defer rows.Close()
-	var tiers []PriceTierRow
+	tiers := []PriceTierRow{}
 	for rows.Next() {
 		var t PriceTierRow
 		rows.Scan(&t.ID, &t.Label, &t.MinQty, &t.DiscountPercent, &t.Active, &t.CreatedAt, &t.UpdatedAt)
@@ -139,7 +139,7 @@ func QueryRelated(ctx context.Context, category, subCategory, excludeID string) 
 		`SELECT id,sku,name,category,sub_category,brand,description,price,stock,unit,image_url,image_type,featured,active,sort_order,material,specifications,created_at,updated_at
          FROM products WHERE active=true AND sub_category=$1 AND id!=$2 LIMIT 6`, subCategory, excludeID)
 	defer rows.Close()
-	var products []ProductRow
+	products := []ProductRow{}
 	for rows.Next() {
 		var p ProductRow
 		rows.Scan(&p.ID, &p.SKU, &p.Name, &p.Category, &p.SubCategory, &p.Brand, &p.Description, &p.Price, &p.Stock, &p.Unit, &p.ImageURL, &p.ImageType, &p.Featured, &p.Active, &p.SortOrder, &p.Material, &p.Specifications, &p.CreatedAt, &p.UpdatedAt)
