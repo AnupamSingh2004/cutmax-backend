@@ -55,6 +55,51 @@ func HandleAdminLogout(w http.ResponseWriter, r *http.Request) {
 	util.JsonOK(w, 200, map[string]interface{}{"message": "Logged out"})
 }
 
+func HandleAdminChangePassword(w http.ResponseWriter, r *http.Request) {
+	var input struct{ CurrentPassword, NewPassword, ConfirmPassword string }
+	if err := util.Decode(r, &input); err != nil || input.CurrentPassword == "" || input.NewPassword == "" || input.ConfirmPassword == "" {
+		util.JsonErr(w, 400, "Current password, new password and confirmation are required")
+		return
+	}
+	if input.NewPassword != input.ConfirmPassword {
+		util.JsonErr(w, 400, "New password and confirmation do not match")
+		return
+	}
+	if len(input.NewPassword) < 10 {
+		util.JsonErr(w, 400, "New password must be at least 10 characters")
+		return
+	}
+	if input.NewPassword == input.CurrentPassword {
+		util.JsonErr(w, 400, "New password must be different from the current password")
+		return
+	}
+
+	id, _ := r.Context().Value(middleware.AdminIDKey).(string)
+	var hash string
+	if err := db.Pool.QueryRow(r.Context(), "SELECT password_hash FROM admin_users WHERE id=$1", id).Scan(&hash); err != nil {
+		util.JsonErr(w, 404, "Admin not found")
+		return
+	}
+	if err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(input.CurrentPassword)); err != nil {
+		util.JsonErr(w, 401, "Current password is incorrect")
+		return
+	}
+
+	newHash, err := bcrypt.GenerateFromPassword([]byte(input.NewPassword), 12)
+	if err != nil {
+		util.JsonErr(w, 500, "Could not set new password")
+		return
+	}
+	if _, err := db.Pool.Exec(r.Context(), "UPDATE admin_users SET password_hash=$1 WHERE id=$2", string(newHash), id); err != nil {
+		util.JsonErr(w, 500, "Could not update password")
+		return
+	}
+
+	// Force re-login with the new password rather than keeping the current session alive.
+	http.SetCookie(w, &http.Cookie{Name: "cutmax_admin", Value: "", Path: "/", MaxAge: -1, HttpOnly: true, Secure: true, SameSite: http.SameSiteNoneMode})
+	util.JsonOK(w, 200, map[string]interface{}{"message": "Password updated. Please log in again."})
+}
+
 func HandleAdminMe(w http.ResponseWriter, r *http.Request) {
 	id, _ := r.Context().Value(middleware.AdminIDKey).(string)
 	email, _ := r.Context().Value(middleware.AdminEmailKey).(string)

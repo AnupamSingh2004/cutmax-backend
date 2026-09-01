@@ -56,6 +56,7 @@ func New() http.Handler {
 
 	// Admin routes
 	r.Route("/api/admin/auth", func(r chi.Router) {
+		r.Use(middleware.NoStore)
 		r.Group(func(r chi.Router) {
 			r.Use(middleware.RateLimit(middleware.RLAdminLogin))
 			r.Post("/login", handlers.HandleAdminLogin)
@@ -64,10 +65,15 @@ func New() http.Handler {
 		r.Group(func(r chi.Router) {
 			r.Use(middleware.RequireAdmin)
 			r.Get("/me", handlers.HandleAdminMe)
+			r.Group(func(r chi.Router) {
+				r.Use(middleware.RateLimit(middleware.RLAdminPassword))
+				r.Put("/password", handlers.HandleAdminChangePassword)
+			})
 		})
 	})
 	r.Group(func(r chi.Router) {
 		r.Use(middleware.RequireAdmin)
+		r.Use(middleware.NoStore)
 		r.Get("/api/admin/products", handlers.HandleAdminProducts)
 		r.Post("/api/admin/products", handlers.HandleAdminProducts)
 		r.Put("/api/admin/products/{id}", handlers.HandleAdminProduct)

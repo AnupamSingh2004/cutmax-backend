@@ -152,6 +152,13 @@ func LoadActiveProducts(ctx context.Context) []ProductRow {
 	return QueryProducts(ctx, "SELECT id,sku,name,category,sub_category,brand,description,price,stock,unit,image_url,image_type,featured,active,sort_order,material,specifications,created_at,updated_at FROM products WHERE active=true")
 }
 
+// LoadAllProducts includes inactive products too — needed so bulk image
+// uploads can still match products that were auto-deactivated by a bulk
+// import pending their first image (see HandleBulkProducts/HandleBulkImages).
+func LoadAllProducts(ctx context.Context) []ProductRow {
+	return QueryProducts(ctx, "SELECT id,sku,name,category,sub_category,brand,description,price,stock,unit,image_url,image_type,featured,active,sort_order,material,specifications,created_at,updated_at FROM products")
+}
+
 func MatchProductByFilename(filename string, products []ProductRow) *ProductRow {
 	name := strings.ToLower(strings.TrimSuffix(filename, filepath.Ext(filename)))
 	name = regexp.MustCompile(`[^a-z0-9]`).ReplaceAllString(name, "")

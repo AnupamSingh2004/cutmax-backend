@@ -36,6 +36,20 @@ func SecurityHeaders(next http.Handler) http.Handler {
 		w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
 		w.Header().Set("X-XSS-Protection", "1; mode=block")
 		w.Header().Set("Permissions-Policy", "geolocation=(), microphone=(), camera=(), payment=()")
+		// This origin only ever serves JSON and uploaded media, never HTML —
+		// a locked-down CSP means a mis-typed Content-Type or a spoofed upload
+		// can't be rendered as a page with active script content.
+		w.Header().Set("Content-Security-Policy", "default-src 'none'")
+		next.ServeHTTP(w, r)
+	})
+}
+
+// NoStore prevents any cache (browser, CDN, or intermediary proxy) from
+// storing admin API responses, which can carry sensitive business data.
+func NoStore(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate")
+		w.Header().Set("Pragma", "no-cache")
 		next.ServeHTTP(w, r)
 	})
 }
@@ -116,6 +130,7 @@ type RLBucket string
 
 const (
 	RLAdminLogin    RLBucket = "admin-login"
+	RLAdminPassword RLBucket = "admin-password-change"
 	RLCustomerLogin RLBucket = "customer-login"
 	RLCustomerReg   RLBucket = "customer-register"
 	RLEnquirySubmit RLBucket = "enquiry-submit"
@@ -128,6 +143,7 @@ const (
 
 var rlLimits = map[RLBucket][2]int{
 	RLAdminLogin:    {10, 300},
+	RLAdminPassword: {10, 300},
 	RLCustomerLogin: {10, 300},
 	RLCustomerReg:   {5, 600},
 	RLEnquirySubmit: {5, 600},

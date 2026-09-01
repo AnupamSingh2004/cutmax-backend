@@ -90,8 +90,12 @@ func HandleBulkProducts(w http.ResponseWriter, r *http.Request) {
 		var existingID string
 		err := db.Pool.QueryRow(r.Context(), "SELECT id FROM products WHERE sku=$1", sku).Scan(&existingID)
 		if err == pgx.ErrNoRows {
+			// New products from a bulk import start inactive — they won't show on
+			// the storefront until an image is attached via the bulk image upload
+			// (or the regular edit form), so half-finished imports can't go live
+			// with a placeholder image.
 			_, err = db.Pool.Exec(r.Context(),
-				`INSERT INTO products (sku,name,category,sub_category,brand,description,price,stock,unit,created_at,updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NOW(),NOW())`,
+				`INSERT INTO products (sku,name,category,sub_category,brand,description,price,stock,unit,active,created_at,updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,false,NOW(),NOW())`,
 				sku, rec["name"], rec["category"], rec["subCategory"], brand, rec["description"], price, stock, util.OrDef(rec["unit"], "NOS"))
 			if err != nil {
 				errors = append(errors, map[string]interface{}{"row": i + 2, "sku": sku, "error": err.Error()})
@@ -123,7 +127,7 @@ func HandleBulkImages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	products := db.LoadActiveProducts(r.Context())
+	products := db.LoadAllProducts(r.Context())
 	matched := []map[string]string{}
 	unmatched := []string{}
 	errors := []map[string]string{}
@@ -165,7 +169,8 @@ func HandleBulkImages(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		db.Pool.Exec(r.Context(), "UPDATE products SET image_url=$1,image_type='UPLOADED',updated_at=NOW() WHERE id=$2", url, product.ID)
+		// Uploading an image is what brings a bulk-imported product live.
+		db.Pool.Exec(r.Context(), "UPDATE products SET image_url=$1,image_type='UPLOADED',active=true,updated_at=NOW() WHERE id=$2", url, product.ID)
 		matched = append(matched, map[string]string{"filename": fh.Filename, "sku": product.SKU})
 	}
 
