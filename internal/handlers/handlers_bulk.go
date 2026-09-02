@@ -292,6 +292,7 @@ func HandleBulkImages(w http.ResponseWriter, r *http.Request) {
 	matched := []map[string]string{}
 	unmatched := []string{}
 	errors := []map[string]string{}
+	needsPrice := []string{}
 
 	for _, fh := range files {
 		f, err := fh.Open()
@@ -330,14 +331,21 @@ func HandleBulkImages(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		// Uploading an image is what brings a bulk-imported product live.
-		db.Pool.Exec(r.Context(), "UPDATE products SET image_url=$1,image_type='UPLOADED',active=true,updated_at=NOW() WHERE id=$2", url, product.ID)
+		// Uploading an image is what brings a bulk-imported product live --
+		// but only once it also has a real price; a ₹0 product still needs
+		// an admin to set one before it can go active.
+		if product.Price > 0 {
+			db.Pool.Exec(r.Context(), "UPDATE products SET image_url=$1,image_type='UPLOADED',active=true,updated_at=NOW() WHERE id=$2", url, product.ID)
+		} else {
+			db.Pool.Exec(r.Context(), "UPDATE products SET image_url=$1,image_type='UPLOADED',updated_at=NOW() WHERE id=$2", url, product.ID)
+			needsPrice = append(needsPrice, product.SKU)
+		}
 		matched = append(matched, map[string]string{"filename": fh.Filename, "sku": product.SKU})
 	}
 
 	writeBulkAudit(r, "bulk_image_import", fmt.Sprintf("%d matched, %d unmatched", len(matched), len(unmatched)))
 	util.JsonOK(w, 200, map[string]interface{}{
-		"matched": matched, "unmatched": unmatched, "errors": errors,
+		"matched": matched, "unmatched": unmatched, "errors": errors, "needsPrice": needsPrice,
 		"summary": map[string]interface{}{"total": len(files), "matched": len(matched), "unmatched": len(unmatched), "errors": len(errors)},
 	})
 }

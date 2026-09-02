@@ -147,6 +147,43 @@ func writeProductAudit(r *http.Request, action, productID string) {
 	db.WriteAudit(r.Context(), &adminID, action, fmt.Sprintf("%s (%s)", sku, name), "OK", middleware.ClientIP(r), r.Header.Get("User-Agent"))
 }
 
+// HandleAdminProductsBulkDelete permanently deletes multiple products at
+// once (selected via checkboxes in the admin product list), same semantics
+// as the single-product ?permanent=true delete: real row removal plus its
+// uploaded image, not a deactivate.
+func HandleAdminProductsBulkDelete(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		IDs []string `json:"ids"`
+	}
+	if err := util.Decode(r, &input); err != nil || len(input.IDs) == 0 {
+		util.JsonErr(w, 400, "ids array required")
+		return
+	}
+	adminID, _ := r.Context().Value(middleware.AdminIDKey).(string)
+	ip, ua := middleware.ClientIP(r), r.Header.Get("User-Agent")
+
+	deleted := 0
+	for _, id := range input.IDs {
+		var sku, name string
+		var imageURL *string
+		if err := db.Pool.QueryRow(r.Context(), "SELECT sku,name,image_url FROM products WHERE id=$1", id).Scan(&sku, &name, &imageURL); err != nil {
+			continue
+		}
+		if _, err := db.Pool.Exec(r.Context(), "DELETE FROM products WHERE id=$1", id); err != nil {
+			continue
+		}
+		if imageURL != nil && *imageURL != "" {
+			if key := keyFromURL(*imageURL); key != "" {
+				storage.Active.Delete(r.Context(), key)
+			}
+		}
+		db.WriteAudit(r.Context(), &adminID, "product_delete", fmt.Sprintf("%s (%s)", sku, name), "OK", ip, ua)
+		deleted++
+	}
+	middleware.CacheDelPattern(r.Context(), "cache:products:*")
+	util.JsonOK(w, 200, map[string]interface{}{"deleted": deleted, "requested": len(input.IDs)})
+}
+
 func HandleAdminProduct(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	if r.Method == "PUT" {
@@ -203,6 +240,18 @@ func HandleAdminProduct(w http.ResponseWriter, r *http.Request) {
 			addSet("featured", v)
 		}
 		if v, ok := input["active"].(bool); ok {
+			if v {
+				effectivePrice := 0.0
+				if p, priceOk := input["price"].(float64); priceOk {
+					effectivePrice = p
+				} else {
+					db.Pool.QueryRow(r.Context(), "SELECT price FROM products WHERE id=$1", id).Scan(&effectivePrice)
+				}
+				if effectivePrice <= 0 {
+					util.JsonErr(w, 400, "Set a price before activating this product")
+					return
+				}
+			}
 			addSet("active", v)
 		}
 		if v, ok := input["material"].(string); ok {

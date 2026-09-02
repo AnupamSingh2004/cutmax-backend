@@ -40,11 +40,17 @@ func newS3(cfg config.Config) (*s3Storage, error) {
 }
 
 func (s *s3Storage) Save(ctx context.Context, key string, data []byte, contentType string) (string, error) {
+	// Every upload gets a fresh randomized key (see buildKey), so a given URL's
+	// bytes never change -- replacing a product's image writes a new key and
+	// deletes the old one rather than overwriting in place. That makes it safe
+	// to cache aggressively; without this, excloud's bucket default (5 min)
+	// applies, so browsers re-fetch the same image repeatedly.
 	_, err := s.client.PutObject(ctx, &s3.PutObjectInput{
-		Bucket:      aws.String(s.bucket),
-		Key:         aws.String(key),
-		Body:        bytes.NewReader(data),
-		ContentType: aws.String(contentType),
+		Bucket:       aws.String(s.bucket),
+		Key:          aws.String(key),
+		Body:         bytes.NewReader(data),
+		ContentType:  aws.String(contentType),
+		CacheControl: aws.String("public, max-age=31536000, immutable"),
 	})
 	if err != nil {
 		return "", fmt.Errorf("s3 put: %w", err)
