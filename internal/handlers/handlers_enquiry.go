@@ -26,9 +26,12 @@ func HandleCreateEnquiry(w http.ResponseWriter, r *http.Request) {
 		Payment  *string `json:"payment"`
 		Message  *string `json:"message"`
 		Items    []struct {
-			SKU, Name, Category  string
-			Qty                  int
-			UnitPrice, LineTotal float64
+			SKU       string  `json:"sku"`
+			Name      string  `json:"name"`
+			Category  string  `json:"category"`
+			Qty       int     `json:"qty"`
+			UnitPrice float64 `json:"unitPrice"`
+			LineTotal float64 `json:"lineTotal"`
 		} `json:"items"`
 		Subtotal, GSTRate, GSTAmount, GrandTotal float64
 	}

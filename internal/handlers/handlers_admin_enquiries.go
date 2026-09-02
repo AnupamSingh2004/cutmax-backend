@@ -15,15 +15,37 @@ import (
 
 // ===== Admin Enquiries =====
 
+type enquiryItemOut struct {
+	SKU       string  `json:"sku"`
+	Name      string  `json:"name"`
+	Category  string  `json:"category"`
+	Qty       int     `json:"qty"`
+	UnitPrice float64 `json:"unitPrice"`
+	LineTotal float64 `json:"lineTotal"`
+}
+
 // nonNullItems guards against an enquiry whose items_json was stored as the
 // literal JSON "null" (e.g. an enquiry submitted with an empty cart) --
-// returning that as-is crashes the frontend's enquiry.items.map(...).
+// returning that as-is crashes the frontend's enquiry.items.map(...). It also
+// re-normalizes the casing: a handful of enquiries were stored with
+// PascalCase keys (SKU, UnitPrice, ...) from before HandleCreateEnquiry's
+// input struct had json tags, and json.Unmarshal matches keys
+// case-insensitively, so round-tripping through enquiryItemOut heals those
+// rows on read without a data migration.
 func nonNullItems(raw []byte) json.RawMessage {
 	trimmed := bytes.TrimSpace(raw)
 	if len(trimmed) == 0 || string(trimmed) == "null" {
 		return json.RawMessage("[]")
 	}
-	return json.RawMessage(raw)
+	var items []enquiryItemOut
+	if err := json.Unmarshal(trimmed, &items); err != nil {
+		return json.RawMessage("[]")
+	}
+	normalized, err := json.Marshal(items)
+	if err != nil {
+		return json.RawMessage("[]")
+	}
+	return json.RawMessage(normalized)
 }
 
 func HandleAdminEnquiries(w http.ResponseWriter, r *http.Request) {
