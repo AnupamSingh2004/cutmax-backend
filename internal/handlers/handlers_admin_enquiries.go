@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -13,6 +14,17 @@ import (
 )
 
 // ===== Admin Enquiries =====
+
+// nonNullItems guards against an enquiry whose items_json was stored as the
+// literal JSON "null" (e.g. an enquiry submitted with an empty cart) --
+// returning that as-is crashes the frontend's enquiry.items.map(...).
+func nonNullItems(raw []byte) json.RawMessage {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || string(trimmed) == "null" {
+		return json.RawMessage("[]")
+	}
+	return json.RawMessage(raw)
+}
 
 func HandleAdminEnquiries(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
@@ -52,7 +64,7 @@ func HandleAdminEnquiries(w http.ResponseWriter, r *http.Request) {
 		enqs = append(enqs, map[string]interface{}{
 			"id": e.ID, "reference": e.Reference, "customerName": e.CustomerName, "company": e.Company,
 			"phone": e.Phone, "email": e.Email, "gstin": e.GSTIN, "shippingMethod": e.ShippingMethod,
-			"paymentPreference": e.PaymentPreference, "message": e.Message, "items": json.RawMessage(e.ItemsJSON),
+			"paymentPreference": e.PaymentPreference, "message": e.Message, "items": nonNullItems(e.ItemsJSON),
 			"subtotal": e.Subtotal, "gstRate": e.GSTRate, "gstAmount": e.GSTAmount, "grandTotal": e.GrandTotal,
 			"status": e.Status, "createdAt": e.CreatedAt, "updatedAt": e.UpdatedAt,
 		})
@@ -96,7 +108,7 @@ func HandleAdminEnquiry(w http.ResponseWriter, r *http.Request) {
 		"enquiry": map[string]interface{}{
 			"id": e.ID, "reference": e.Reference, "customerName": e.CustomerName, "company": e.Company,
 			"phone": e.Phone, "email": e.Email, "gstin": e.GSTIN, "shippingMethod": e.ShippingMethod,
-			"paymentPreference": e.PaymentPreference, "message": e.Message, "items": json.RawMessage(e.ItemsJSON),
+			"paymentPreference": e.PaymentPreference, "message": e.Message, "items": nonNullItems(e.ItemsJSON),
 			"subtotal": e.Subtotal, "gstRate": e.GSTRate, "gstAmount": e.GSTAmount, "grandTotal": e.GrandTotal,
 			"status": e.Status, "createdAt": e.CreatedAt, "updatedAt": e.UpdatedAt,
 		},
