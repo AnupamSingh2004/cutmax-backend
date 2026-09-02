@@ -95,6 +95,7 @@ func New() http.Handler {
 		r.Group(func(r chi.Router) {
 			r.Use(middleware.RateLimit(middleware.RLBulkProducts))
 			r.Post("/api/admin/bulk/products", handlers.HandleBulkProducts)
+			r.Post("/api/admin/bulk/stock", handlers.HandleBulkStock)
 		})
 		r.Group(func(r chi.Router) {
 			r.Use(middleware.RateLimit(middleware.RLBulkImages))

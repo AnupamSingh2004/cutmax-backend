@@ -1,10 +1,13 @@
 package handlers
 
 import (
+	"fmt"
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/xuri/excelize/v2"
 
@@ -95,8 +98,8 @@ func HandleBulkProducts(w http.ResponseWriter, r *http.Request) {
 			// (or the regular edit form), so half-finished imports can't go live
 			// with a placeholder image.
 			_, err = db.Pool.Exec(r.Context(),
-				`INSERT INTO products (sku,name,category,sub_category,brand,description,price,stock,unit,active,created_at,updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,false,NOW(),NOW())`,
-				sku, rec["name"], rec["category"], rec["subCategory"], brand, rec["description"], price, stock, util.OrDef(rec["unit"], "NOS"))
+				`INSERT INTO products (id,sku,name,category,sub_category,brand,description,price,stock,unit,active,created_at,updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,false,NOW(),NOW())`,
+				uuid.New().String(), sku, rec["name"], rec["category"], rec["subCategory"], brand, rec["description"], price, stock, util.OrDef(rec["unit"], "NOS"))
 			if err != nil {
 				errors = append(errors, map[string]interface{}{"row": i + 2, "sku": sku, "error": err.Error()})
 				skipped++
@@ -115,6 +118,155 @@ func HandleBulkProducts(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	util.JsonOK(w, 200, map[string]interface{}{"inserted": inserted, "updated": updated, "skipped": skipped, "errors": errors})
+}
+
+// ===== Admin Bulk Stock Import =====
+//
+// Real supplier/stock sheets rarely match the strict sku/name/category
+// headers HandleBulkProducts expects, and often have no SKU column at all —
+// just an item name and a quantity. This importer accepts a looser set of
+// header aliases and matches rows to existing products by name (since that's
+// the only column guaranteed to line up with what's already in the catalog).
+// A name with no existing match creates a new, inactive product with an
+// auto-generated SKU, same "needs an image before going live" rule as
+// HandleBulkProducts.
+
+var stockHeaderAliases = map[string][]string{
+	"name":        {"item", "name", "product", "productname", "itemname"},
+	"category":    {"category", "cotegry", "categry", "cat"},
+	"subCategory": {"subcategory", "subcotegry", "subcat", "subcategry"},
+	"brand":       {"brand", "make"},
+	"stock":       {"qty", "quantity", "stock", "stockqty"},
+	"sku":         {"sku", "code", "itemcode"},
+}
+
+func normalizeStockHeader(h string) string {
+	h = strings.ToLower(strings.TrimSpace(h))
+	return strings.NewReplacer(" ", "", "-", "", "_", "").Replace(h)
+}
+
+// isStockPlaceholder catches sheets where a blank cell inherited the header
+// text itself (e.g. a "SUB-COTEGRY" literal sitting in a sub-category cell).
+func isStockPlaceholder(v string) bool {
+	n := normalizeStockHeader(v)
+	for _, aliases := range stockHeaderAliases {
+		for _, a := range aliases {
+			if n == a {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func mapStockColumns(header []string) map[string]int {
+	cols := map[string]int{}
+	for i, h := range header {
+		norm := normalizeStockHeader(h)
+		for field, aliases := range stockHeaderAliases {
+			if _, already := cols[field]; already {
+				continue
+			}
+			for _, alias := range aliases {
+				if norm == alias {
+					cols[field] = i
+				}
+			}
+		}
+	}
+	return cols
+}
+
+func HandleBulkStock(w http.ResponseWriter, r *http.Request) {
+	file, _, err := r.FormFile("file")
+	if err != nil {
+		util.JsonErr(w, 400, "file required")
+		return
+	}
+	defer file.Close()
+	f, err := excelize.OpenReader(file)
+	if err != nil {
+		util.JsonErr(w, 422, "Could not parse file as XLSX")
+		return
+	}
+	defer f.Close()
+	rows, err := f.GetRows(f.GetSheetName(0))
+	if err != nil || len(rows) < 2 {
+		util.JsonErr(w, 422, "Empty or invalid spreadsheet")
+		return
+	}
+
+	cols := mapStockColumns(rows[0])
+	if _, ok := cols["name"]; !ok {
+		util.JsonErr(w, 422, "Could not find an item/name column in the spreadsheet")
+		return
+	}
+
+	get := func(row []string, field string) string {
+		col, ok := cols[field]
+		if !ok || col >= len(row) {
+			return ""
+		}
+		v := strings.TrimSpace(row[col])
+		if isStockPlaceholder(v) {
+			return ""
+		}
+		return v
+	}
+
+	existing := db.LoadAllProducts(r.Context())
+	byName := map[string]*db.ProductRow{}
+	nextSKU := 1
+	for i := range existing {
+		byName[strings.ToLower(strings.TrimSpace(existing[i].Name))] = &existing[i]
+		var n int
+		if _, err := fmt.Sscanf(existing[i].SKU, "CT-%d", &n); err == nil && n >= nextSKU {
+			nextSKU = n + 1
+		}
+	}
+
+	updated, created, skipped := 0, 0, 0
+	createdSKUs := []map[string]string{}
+	errs := []map[string]interface{}{}
+
+	for i, row := range rows[1:] {
+		name := get(row, "name")
+		if name == "" {
+			skipped++
+			continue
+		}
+		stock, _ := strconv.Atoi(strings.TrimSpace(get(row, "stock")))
+
+		if p, found := byName[strings.ToLower(name)]; found {
+			if _, err := db.Pool.Exec(r.Context(), "UPDATE products SET stock=$1,updated_at=NOW() WHERE id=$2", stock, p.ID); err != nil {
+				errs = append(errs, map[string]interface{}{"row": i + 2, "name": name, "error": err.Error()})
+				skipped++
+				continue
+			}
+			updated++
+			continue
+		}
+
+		sku := fmt.Sprintf("CT-%05d", nextSKU)
+		nextSKU++
+		category := util.OrDef(get(row, "category"), "Uncategorized")
+		subCategory := util.OrDef(get(row, "subCategory"), "General")
+		brand := util.OrDef(get(row, "brand"), "CUT-STOCK")
+		if _, err := db.Pool.Exec(r.Context(),
+			`INSERT INTO products (id,sku,name,category,sub_category,brand,description,price,stock,unit,active,created_at,updated_at) VALUES ($1,$2,$3,$4,$5,$6,'',0,$7,'NOS',false,NOW(),NOW())`,
+			uuid.New().String(), sku, name, category, subCategory, brand, stock); err != nil {
+			errs = append(errs, map[string]interface{}{"row": i + 2, "name": name, "error": err.Error()})
+			skipped++
+			continue
+		}
+		created++
+		createdSKUs = append(createdSKUs, map[string]string{"sku": sku, "name": name})
+	}
+
+	util.JsonOK(w, 200, map[string]interface{}{
+		"updated": updated, "created": created, "skipped": skipped,
+		"createdProducts": createdSKUs, "errors": errs,
+	})
 }
 
 // ===== Admin Bulk Image Import =====
