@@ -13,9 +13,15 @@ import (
 
 	"github.com/cutmax/cutmax-backend/internal/config"
 	"github.com/cutmax/cutmax-backend/internal/db"
+	"github.com/cutmax/cutmax-backend/internal/middleware"
 	"github.com/cutmax/cutmax-backend/internal/storage"
 	"github.com/cutmax/cutmax-backend/internal/util"
 )
+
+func writeBulkAudit(r *http.Request, action, detail string) {
+	adminID, _ := r.Context().Value(middleware.AdminIDKey).(string)
+	db.WriteAudit(r.Context(), &adminID, action, detail, "OK", middleware.ClientIP(r), r.Header.Get("User-Agent"))
+}
 
 // ===== Admin Bulk Prices =====
 
@@ -40,6 +46,7 @@ func HandleBulkPrices(w http.ResponseWriter, r *http.Request) {
 			updated++
 		}
 	}
+	writeBulkAudit(r, "bulk_price_update", fmt.Sprintf("%d updated, %d skipped", updated, skipped))
 	util.JsonOK(w, 200, map[string]interface{}{"updated": updated, "skipped": skipped})
 }
 
@@ -117,6 +124,7 @@ func HandleBulkProducts(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	writeBulkAudit(r, "bulk_product_import", fmt.Sprintf("%d inserted, %d updated, %d skipped", inserted, updated, skipped))
 	util.JsonOK(w, 200, map[string]interface{}{"inserted": inserted, "updated": updated, "skipped": skipped, "errors": errors})
 }
 
@@ -263,6 +271,7 @@ func HandleBulkStock(w http.ResponseWriter, r *http.Request) {
 		createdSKUs = append(createdSKUs, map[string]string{"sku": sku, "name": name})
 	}
 
+	writeBulkAudit(r, "bulk_stock_import", fmt.Sprintf("%d updated, %d created, %d skipped", updated, created, skipped))
 	util.JsonOK(w, 200, map[string]interface{}{
 		"updated": updated, "created": created, "skipped": skipped,
 		"createdProducts": createdSKUs, "errors": errs,
@@ -326,6 +335,7 @@ func HandleBulkImages(w http.ResponseWriter, r *http.Request) {
 		matched = append(matched, map[string]string{"filename": fh.Filename, "sku": product.SKU})
 	}
 
+	writeBulkAudit(r, "bulk_image_import", fmt.Sprintf("%d matched, %d unmatched", len(matched), len(unmatched)))
 	util.JsonOK(w, 200, map[string]interface{}{
 		"matched": matched, "unmatched": unmatched, "errors": errors,
 		"summary": map[string]interface{}{"total": len(files), "matched": len(matched), "unmatched": len(unmatched), "errors": len(errors)},

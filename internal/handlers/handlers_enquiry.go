@@ -1,8 +1,8 @@
 package handlers
 
 import (
-	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 
@@ -41,10 +41,6 @@ func HandleCreateEnquiry(w http.ResponseWriter, r *http.Request) {
 	ip := middleware.ClientIP(r)
 	ua := r.UserAgent()
 	custID, _ := r.Context().Value(middleware.CustIDKey).(string)
-	custEmail := ""
-	if v, ok := r.Context().Value(middleware.CustEmailKey).(string); ok {
-		custEmail = v
-	}
 	itemsJSON, _ := json.Marshal(input.Items)
 
 	tx, err := db.Pool.Begin(r.Context())
@@ -86,28 +82,11 @@ func HandleCreateEnquiry(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Best-effort email (non-blocking)
-	go sendEnqEmail(struct {
-		Name       string
-		Email      *string
-		GrandTotal float64
-	}{input.Name, input.Email, input.GrandTotal}, ref, custEmail)
+	company := input.Name
+	if input.Company != nil && *input.Company != "" {
+		company = *input.Company
+	}
+	db.WriteAudit(r.Context(), nil, "enquiry_submitted", fmt.Sprintf("%s — %s", ref, company), "OK", ip, ua)
 
 	util.JsonOK(w, 201, map[string]interface{}{"reference": ref, "message": "Enquiry submitted successfully"})
-}
-
-func sendEnqEmail(input struct {
-	Name       string
-	Email      *string
-	GrandTotal float64
-}, ref, custEmail string) {
-	ctx := context.Background()
-	var notifyEmail string
-	db.Pool.QueryRow(ctx, "SELECT value FROM settings WHERE key='notify_email'").Scan(&notifyEmail)
-	if notifyEmail != "" {
-		log.Printf("[email] Would send enquiry notification to %s for %s", notifyEmail, ref)
-	}
-	if input.Email != nil && *input.Email != "" {
-		log.Printf("[email] Would send confirmation to %s for %s", *input.Email, ref)
-	}
 }

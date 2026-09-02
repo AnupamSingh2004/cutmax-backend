@@ -138,25 +138,10 @@ func buildProductList(r *http.Request) map[string]interface{} {
 	brands := db.QueryDistinct("SELECT DISTINCT brand FROM products WHERE active = true")
 	materials := db.QueryDistinct("SELECT DISTINCT material FROM products WHERE active = true AND material IS NOT NULL")
 
-	// Settings used by the frontend
-	var lowStock int
-	db.Pool.QueryRow(r.Context(), "SELECT COALESCE(value::int,10) FROM settings WHERE key='low_stock_limit'").Scan(&lowStock)
-	var gstRate float64
-	db.Pool.QueryRow(r.Context(), "SELECT COALESCE(value::float,18) FROM settings WHERE key='gst_percent'").Scan(&gstRate)
-	var whatsapp string
-	db.Pool.QueryRow(r.Context(), "SELECT COALESCE(value,'') FROM settings WHERE key='whatsapp'").Scan(&whatsapp)
-	var heroVideoURL string
-	db.Pool.QueryRow(r.Context(), "SELECT COALESCE(value,'') FROM settings WHERE key='hero_video_url'").Scan(&heroVideoURL)
-	var bgVideoURL string
-	db.Pool.QueryRow(r.Context(), "SELECT COALESCE(value,'') FROM settings WHERE key='site_background_video_url'").Scan(&bgVideoURL)
-
 	return map[string]interface{}{
 		"products": products, "total": total, "page": page, "per_page": perPage,
 		"categories": cats, "subCategories": subCats, "brands": brands, "materials": materials,
-		"settings": map[string]interface{}{
-			"whatsapp": whatsapp, "gst_percent": gstRate, "low_stock": lowStock,
-			"hero_video_url": heroVideoURL, "site_background_video_url": bgVideoURL,
-		},
+		"settings": db.LoadPublicSettings(r.Context()),
 	}
 }
 

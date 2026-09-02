@@ -12,6 +12,7 @@ import (
 
 	"github.com/cutmax/cutmax-backend/internal/db"
 	"github.com/cutmax/cutmax-backend/internal/middleware"
+	"github.com/cutmax/cutmax-backend/internal/storage"
 	"github.com/cutmax/cutmax-backend/internal/util"
 )
 
@@ -130,9 +131,20 @@ func createProduct(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	middleware.CacheDelPattern(r.Context(), "cache:products:*")
+	adminID, _ := r.Context().Value(middleware.AdminIDKey).(string)
+	db.WriteAudit(r.Context(), &adminID, "product_create", fmt.Sprintf("%s (%s)", input.SKU, input.Name), "OK", middleware.ClientIP(r), r.Header.Get("User-Agent"))
 	util.JsonOK(w, 201, map[string]interface{}{
 		"product": map[string]interface{}{"id": pid, "sku": input.SKU, "name": input.Name, "category": input.Category, "subCategory": input.SubCategory},
 	})
+}
+
+// writeProductAudit looks up a product's SKU/name for a readable audit detail
+// (the update/delete handlers only have the opaque id from the URL).
+func writeProductAudit(r *http.Request, action, productID string) {
+	var sku, name string
+	db.Pool.QueryRow(r.Context(), "SELECT sku,name FROM products WHERE id=$1", productID).Scan(&sku, &name)
+	adminID, _ := r.Context().Value(middleware.AdminIDKey).(string)
+	db.WriteAudit(r.Context(), &adminID, action, fmt.Sprintf("%s (%s)", sku, name), "OK", middleware.ClientIP(r), r.Header.Get("User-Agent"))
 }
 
 func HandleAdminProduct(w http.ResponseWriter, r *http.Request) {
@@ -210,10 +222,29 @@ func HandleAdminProduct(w http.ResponseWriter, r *http.Request) {
 		args = append(args, id)
 		db.Pool.Exec(r.Context(), fmt.Sprintf("UPDATE products SET %s WHERE id=$%d", strings.Join(sets, ","), idx), args...)
 		middleware.CacheDelPattern(r.Context(), "cache:products:*")
+		writeProductAudit(r, "product_update", id)
 		util.JsonOK(w, 200, map[string]interface{}{"message": "Product updated"})
 		return
 	}
 	if r.Method == "DELETE" {
+		if r.URL.Query().Get("permanent") == "true" {
+			var imageURL *string
+			db.Pool.QueryRow(r.Context(), "SELECT image_url FROM products WHERE id=$1", id).Scan(&imageURL)
+			writeProductAudit(r, "product_delete", id)
+			if _, err := db.Pool.Exec(r.Context(), "DELETE FROM products WHERE id=$1", id); err != nil {
+				util.JsonErr(w, 500, "Failed to delete product")
+				return
+			}
+			if imageURL != nil && *imageURL != "" {
+				if key := keyFromURL(*imageURL); key != "" {
+					storage.Active.Delete(r.Context(), key)
+				}
+			}
+			middleware.CacheDelPattern(r.Context(), "cache:products:*")
+			util.JsonOK(w, 200, map[string]interface{}{"message": "Product permanently deleted"})
+			return
+		}
+		writeProductAudit(r, "product_deactivate", id)
 		db.Pool.Exec(r.Context(), "UPDATE products SET active=false, updated_at=NOW() WHERE id=$1", id)
 		middleware.CacheDelPattern(r.Context(), "cache:products:*")
 		util.JsonOK(w, 200, map[string]interface{}{"message": "Product deactivated"})

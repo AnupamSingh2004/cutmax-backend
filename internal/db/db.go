@@ -3,11 +3,14 @@ package db
 import (
 	"context"
 	"encoding/json"
+	"log"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -15,6 +18,19 @@ import (
 // ===== Helpers =====
 
 var Pool *pgxpool.Pool
+
+// WriteAudit records an entry in the audit trail. adminID is nil for
+// unauthenticated actions (e.g. a customer submitting an enquiry). Fire and
+// forget: an audit-log failure shouldn't fail the request that triggered it,
+// but is worth logging since a silently-broken audit trail defeats its point.
+func WriteAudit(ctx context.Context, adminID *string, action, detail, status, ip, userAgent string) {
+	_, err := Pool.Exec(ctx,
+		"INSERT INTO audit_log (id,admin_id,action,detail,status,ip,user_agent,created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,NOW())",
+		uuid.New().String(), adminID, action, detail, status, ip, userAgent)
+	if err != nil {
+		log.Printf("[audit] failed to write %q: %v", action, err)
+	}
+}
 
 type ProductRow struct {
 	ID             string          `json:"id"`
@@ -150,6 +166,50 @@ func QueryRelated(ctx context.Context, category, subCategory, excludeID string) 
 
 func LoadActiveProducts(ctx context.Context) []ProductRow {
 	return QueryProducts(ctx, "SELECT id,sku,name,category,sub_category,brand,description,price,stock,unit,image_url,image_type,featured,active,sort_order,material,specifications,created_at,updated_at FROM products WHERE active=true")
+}
+
+// LoadPublicSettings fetches every settings row in one query and returns the
+// subset that's safe/relevant to expose publicly, with sane defaults for
+// anything unset. Add a new key here (and to admin settings) to make it show
+// up on the storefront -- see cutmax-frontend's PublicSettings type.
+func LoadPublicSettings(ctx context.Context) map[string]interface{} {
+	rows, err := Pool.Query(ctx, "SELECT key, value FROM settings")
+	vals := map[string]string{}
+	if err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var k, v string
+			if rows.Scan(&k, &v) == nil {
+				vals[k] = v
+			}
+		}
+	}
+	get := func(key, def string) string {
+		if v, ok := vals[key]; ok && v != "" {
+			return v
+		}
+		return def
+	}
+	lowStock := 10
+	if n, err := strconv.Atoi(vals["low_stock_limit"]); err == nil {
+		lowStock = n
+	}
+	gstRate := 18.0
+	if f, err := strconv.ParseFloat(vals["gst_percent"], 64); err == nil {
+		gstRate = f
+	}
+	return map[string]interface{}{
+		"whatsapp":                  get("whatsapp", ""),
+		"gst_percent":               gstRate,
+		"low_stock":                 lowStock,
+		"hero_video_url":            get("hero_video_url", ""),
+		"site_background_video_url": get("site_background_video_url", ""),
+		"hero_title":                get("hero_title", ""),
+		"hero_subtitle":             get("hero_subtitle", ""),
+		"company_name":              get("company_name", ""),
+		"company_address":           get("company_address", ""),
+		"company_phone":             get("company_phone", ""),
+	}
 }
 
 // LoadAllProducts includes inactive products too — needed so bulk image
