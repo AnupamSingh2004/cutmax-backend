@@ -4,15 +4,21 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-pdf/fpdf"
 
+	"github.com/cutmax/cutmax-backend/internal/assets"
 	"github.com/cutmax/cutmax-backend/internal/db"
 	"github.com/cutmax/cutmax-backend/internal/util"
 )
+
+// logoAspectRatio is the embedded logo's width/height (640x272px) -- used to
+// size the PDF placement without decoding the image at request time.
+const logoAspectRatio = 640.0 / 272.0
 
 // parseItems mirrors nonNullItems' tolerance for a missing/malformed
 // items_json column but returns the typed slice a PDF table needs to iterate,
@@ -67,16 +73,29 @@ func HandleAdminEnquiryPDF(w http.ResponseWriter, r *http.Request) {
 	pdf.SetAutoPageBreak(true, 20)
 	pdf.AddPage()
 
-	pdf.SetFont("Helvetica", "B", 18)
-	pdf.CellFormat(0, 9, companyName, "", 1, "L", false, 0, "")
+	const logoX, logoY, logoW = 15.0, 15.0, 30.0
+	logoH := logoW / logoAspectRatio
+	pdf.RegisterImageOptionsReader("logo", fpdf.ImageOptions{ImageType: "PNG"}, bytes.NewReader(assets.LogoPNG))
+	pdf.ImageOptions("logo", logoX, logoY, logoW, logoH, false, fpdf.ImageOptions{ImageType: "PNG"}, 0, "")
+
+	textX := logoX + logoW + 6
+	pdf.SetXY(textX, logoY)
+	pdf.SetFont("Helvetica", "B", 16)
+	pdf.CellFormat(0, 7, companyName, "", 2, "L", false, 0, "")
 	pdf.SetFont("Helvetica", "", 10)
+	textLines := 1.0
 	if companyAddress != "" {
-		pdf.CellFormat(0, 5, companyAddress, "", 1, "L", false, 0, "")
+		pdf.SetX(textX)
+		pdf.CellFormat(0, 5.5, companyAddress, "", 2, "L", false, 0, "")
+		textLines++
 	}
 	if companyPhone != "" {
-		pdf.CellFormat(0, 5, "Phone: "+companyPhone, "", 1, "L", false, 0, "")
+		pdf.SetX(textX)
+		pdf.CellFormat(0, 5.5, "Phone: "+companyPhone, "", 2, "L", false, 0, "")
+		textLines++
 	}
-	pdf.Ln(4)
+	textBottom := logoY + 7 + 5.5*(textLines-1)
+	pdf.SetXY(15, math.Max(textBottom, logoY+logoH)+8)
 
 	pdf.SetFont("Helvetica", "B", 14)
 	pdf.CellFormat(0, 8, "QUOTATION", "", 1, "L", false, 0, "")
