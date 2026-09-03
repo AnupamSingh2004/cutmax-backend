@@ -128,8 +128,8 @@ func buildProductList(r *http.Request) map[string]interface{} {
 	var total int
 	db.Pool.QueryRow(r.Context(), "SELECT COUNT(*) FROM products p WHERE "+where, args...).Scan(&total)
 
-	query := fmt.Sprintf(`SELECT id,sku,name,category,sub_category,brand,description,price,stock,unit,image_url,image_type,featured,active,sort_order,material,specifications,created_at,updated_at
-        FROM products p WHERE %s ORDER BY %s LIMIT $%d OFFSET $%d`, where, orderBy, idx, idx+1)
+	query := fmt.Sprintf(`SELECT %s
+        FROM products p WHERE %s ORDER BY %s LIMIT $%d OFFSET $%d`, db.ProductColumns, where, orderBy, idx, idx+1)
 	args = append(args, perPage, offset)
 
 	products := db.QueryProducts(r.Context(), query, args...)
@@ -155,10 +155,9 @@ func HandleGetProduct(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var p db.ProductRow
-	err := db.Pool.QueryRow(r.Context(),
-		`SELECT id,sku,name,category,sub_category,brand,description,price,stock,unit,image_url,image_type,featured,active,sort_order,material,specifications,created_at,updated_at
-         FROM products WHERE (sku = $1 OR id = $1) AND active = true`, sku,
-	).Scan(&p.ID, &p.SKU, &p.Name, &p.Category, &p.SubCategory, &p.Brand, &p.Description, &p.Price, &p.Stock, &p.Unit, &p.ImageURL, &p.ImageType, &p.Featured, &p.Active, &p.SortOrder, &p.Material, &p.Specifications, &p.CreatedAt, &p.UpdatedAt)
+	err := db.ScanProduct(db.Pool.QueryRow(r.Context(),
+		fmt.Sprintf(`SELECT %s FROM products WHERE (sku = $1 OR id = $1) AND active = true`, db.ProductColumns), sku,
+	), &p)
 	if err != nil {
 		util.JsonErr(w, 404, "Product not found")
 		return

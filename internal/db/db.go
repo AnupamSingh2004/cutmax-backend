@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"path/filepath"
 	"regexp"
@@ -33,25 +34,39 @@ func WriteAudit(ctx context.Context, adminID *string, action, detail, status, ip
 }
 
 type ProductRow struct {
-	ID             string          `json:"id"`
-	SKU            string          `json:"sku"`
-	Name           string          `json:"name"`
-	Category       string          `json:"category"`
-	SubCategory    string          `json:"subCategory"`
-	Brand          string          `json:"brand"`
-	Description    string          `json:"description"`
-	Price          float64         `json:"price"`
-	Stock          int             `json:"stock"`
-	Unit           string          `json:"unit"`
-	ImageURL       *string         `json:"imageUrl"`
-	ImageType      string          `json:"imageType"`
-	Featured       bool            `json:"featured"`
-	Active         bool            `json:"active"`
-	SortOrder      int             `json:"sortOrder"`
-	Material       *string         `json:"material"`
-	Specifications json.RawMessage `json:"specifications"`
-	CreatedAt      time.Time       `json:"createdAt"`
-	UpdatedAt      time.Time       `json:"updatedAt"`
+	ID                string          `json:"id"`
+	SKU               string          `json:"sku"`
+	Name              string          `json:"name"`
+	Category          string          `json:"category"`
+	SubCategory       string          `json:"subCategory"`
+	Brand             string          `json:"brand"`
+	Description       string          `json:"description"`
+	Price             float64         `json:"price"`
+	Stock             int             `json:"stock"`
+	Unit              string          `json:"unit"`
+	ImageURL          *string         `json:"imageUrl"`
+	ImageType         string          `json:"imageType"`
+	Featured          bool            `json:"featured"`
+	Active            bool            `json:"active"`
+	SortOrder         int             `json:"sortOrder"`
+	Material          *string         `json:"material"`
+	Specifications    json.RawMessage `json:"specifications"`
+	LowStockThreshold *int            `json:"lowStockThreshold"`
+	CreatedAt         time.Time       `json:"createdAt"`
+	UpdatedAt         time.Time       `json:"updatedAt"`
+}
+
+// ProductColumns is the canonical column list/order for every SELECT that
+// scans into a ProductRow via ScanProduct. Defined once so adding a column
+// (like low_stock_threshold) can't silently miss one of the several queries
+// that read the products table -- that exact mistake (a missing `id` column)
+// broke bulk imports before this was consolidated.
+const ProductColumns = "id,sku,name,category,sub_category,brand,description,price,stock,unit,image_url,image_type,featured,active,sort_order,material,specifications,low_stock_threshold,created_at,updated_at"
+
+// ScanProduct scans one products-table row (selected via ProductColumns, in
+// that exact order) into p.
+func ScanProduct(row pgx.Row, p *ProductRow) error {
+	return row.Scan(&p.ID, &p.SKU, &p.Name, &p.Category, &p.SubCategory, &p.Brand, &p.Description, &p.Price, &p.Stock, &p.Unit, &p.ImageURL, &p.ImageType, &p.Featured, &p.Active, &p.SortOrder, &p.Material, &p.Specifications, &p.LowStockThreshold, &p.CreatedAt, &p.UpdatedAt)
 }
 
 type PriceTierRow struct {
@@ -107,10 +122,6 @@ func ReplacePriceBreaks(ctx context.Context, productID string, breaks []PriceBre
 	return tx.Commit(ctx)
 }
 
-var scanProduct = func(row pgx.Row, p *ProductRow) error {
-	return row.Scan(&p.ID, &p.SKU, &p.Name, &p.Category, &p.SubCategory, &p.Brand, &p.Description, &p.Price, &p.Stock, &p.Unit, &p.ImageURL, &p.ImageType, &p.Featured, &p.Active, &p.SortOrder, &p.Material, &p.Specifications, &p.CreatedAt, &p.UpdatedAt)
-}
-
 func QueryProducts(ctx context.Context, query string, args ...interface{}) []ProductRow {
 	rows, err := Pool.Query(ctx, query, args...)
 	if err != nil {
@@ -120,7 +131,7 @@ func QueryProducts(ctx context.Context, query string, args ...interface{}) []Pro
 	products := []ProductRow{}
 	for rows.Next() {
 		var p ProductRow
-		rows.Scan(&p.ID, &p.SKU, &p.Name, &p.Category, &p.SubCategory, &p.Brand, &p.Description, &p.Price, &p.Stock, &p.Unit, &p.ImageURL, &p.ImageType, &p.Featured, &p.Active, &p.SortOrder, &p.Material, &p.Specifications, &p.CreatedAt, &p.UpdatedAt)
+		ScanProduct(rows, &p)
 		products = append(products, p)
 	}
 	return products
@@ -152,20 +163,19 @@ func QueryActiveTiers(ctx context.Context) []PriceTierRow {
 
 func QueryRelated(ctx context.Context, category, subCategory, excludeID string) []ProductRow {
 	rows, _ := Pool.Query(ctx,
-		`SELECT id,sku,name,category,sub_category,brand,description,price,stock,unit,image_url,image_type,featured,active,sort_order,material,specifications,created_at,updated_at
-         FROM products WHERE active=true AND sub_category=$1 AND id!=$2 LIMIT 6`, subCategory, excludeID)
+		fmt.Sprintf(`SELECT %s FROM products WHERE active=true AND sub_category=$1 AND id!=$2 LIMIT 6`, ProductColumns), subCategory, excludeID)
 	defer rows.Close()
 	products := []ProductRow{}
 	for rows.Next() {
 		var p ProductRow
-		rows.Scan(&p.ID, &p.SKU, &p.Name, &p.Category, &p.SubCategory, &p.Brand, &p.Description, &p.Price, &p.Stock, &p.Unit, &p.ImageURL, &p.ImageType, &p.Featured, &p.Active, &p.SortOrder, &p.Material, &p.Specifications, &p.CreatedAt, &p.UpdatedAt)
+		ScanProduct(rows, &p)
 		products = append(products, p)
 	}
 	return products
 }
 
 func LoadActiveProducts(ctx context.Context) []ProductRow {
-	return QueryProducts(ctx, "SELECT id,sku,name,category,sub_category,brand,description,price,stock,unit,image_url,image_type,featured,active,sort_order,material,specifications,created_at,updated_at FROM products WHERE active=true")
+	return QueryProducts(ctx, fmt.Sprintf("SELECT %s FROM products WHERE active=true", ProductColumns))
 }
 
 // LoadPublicSettings fetches every settings row in one query and returns the
@@ -216,7 +226,7 @@ func LoadPublicSettings(ctx context.Context) map[string]interface{} {
 // uploads can still match products that were auto-deactivated by a bulk
 // import pending their first image (see HandleBulkProducts/HandleBulkImages).
 func LoadAllProducts(ctx context.Context) []ProductRow {
-	return QueryProducts(ctx, "SELECT id,sku,name,category,sub_category,brand,description,price,stock,unit,image_url,image_type,featured,active,sort_order,material,specifications,created_at,updated_at FROM products")
+	return QueryProducts(ctx, fmt.Sprintf("SELECT %s FROM products", ProductColumns))
 }
 
 func MatchProductByFilename(filename string, products []ProductRow) *ProductRow {

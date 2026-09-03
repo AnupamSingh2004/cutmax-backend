@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -27,9 +28,9 @@ func HandleAdminProducts(w http.ResponseWriter, r *http.Request) {
 	id := q.Get("id")
 	if id != "" {
 		var p db.ProductRow
-		err := db.Pool.QueryRow(r.Context(),
-			`SELECT id,sku,name,category,sub_category,brand,description,price,stock,unit,image_url,image_type,featured,active,sort_order,material,specifications,created_at,updated_at FROM products WHERE id=$1`, id,
-		).Scan(&p.ID, &p.SKU, &p.Name, &p.Category, &p.SubCategory, &p.Brand, &p.Description, &p.Price, &p.Stock, &p.Unit, &p.ImageURL, &p.ImageType, &p.Featured, &p.Active, &p.SortOrder, &p.Material, &p.Specifications, &p.CreatedAt, &p.UpdatedAt)
+		err := db.ScanProduct(db.Pool.QueryRow(r.Context(),
+			fmt.Sprintf(`SELECT %s FROM products WHERE id=$1`, db.ProductColumns), id,
+		), &p)
 		if err != nil {
 			util.JsonOK(w, 200, map[string]interface{}{"product": nil})
 			return
@@ -84,7 +85,7 @@ func HandleAdminProducts(w http.ResponseWriter, r *http.Request) {
 
 	var total int
 	db.Pool.QueryRow(r.Context(), "SELECT COUNT(*) FROM products p WHERE "+where, args...).Scan(&total)
-	query := fmt.Sprintf(`SELECT id,sku,name,category,sub_category,brand,description,price,stock,unit,image_url,image_type,featured,active,sort_order,material,specifications,created_at,updated_at FROM products p WHERE %s ORDER BY p.created_at DESC LIMIT $%d OFFSET $%d`, where, idx, idx+1)
+	query := fmt.Sprintf(`SELECT %s FROM products p WHERE %s ORDER BY p.created_at DESC LIMIT $%d OFFSET $%d`, db.ProductColumns, where, idx, idx+1)
 	args = append(args, perPage, offset)
 	products := db.QueryProducts(r.Context(), query, args...)
 	util.JsonOK(w, 200, map[string]interface{}{"products": products, "total": total, "page": page, "per_page": perPage})
@@ -99,6 +100,7 @@ func createProduct(w http.ResponseWriter, r *http.Request) {
 		Featured                                             bool
 		SortOrder                                            int
 		Material                                             string
+		LowStockThreshold                                    *int `json:"lowStockThreshold"`
 		Specifications                                       []struct {
 			Label string `json:"label"`
 			Value string `json:"value"`
@@ -115,11 +117,15 @@ func createProduct(w http.ResponseWriter, r *http.Request) {
 	specsJSON, _ := json.Marshal(input.Specifications)
 	var pid string
 	pid = uuid.New().String()
+	// Always created inactive, same rule as bulk imports: a product needs a
+	// real image before it can go live, and none has been uploaded yet at
+	// the point this row is inserted (the frontend uploads it, if any, in a
+	// separate follow-up call right after creating).
 	_, err := db.Pool.Exec(r.Context(),
-		`INSERT INTO products (id,sku,name,category,sub_category,brand,description,price,stock,unit,featured,sort_order,material,specifications,created_at,updated_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14::jsonb,NOW(),NOW())`,
+		`INSERT INTO products (id,sku,name,category,sub_category,brand,description,price,stock,unit,featured,active,sort_order,material,specifications,low_stock_threshold,created_at,updated_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,false,$12,$13,$14::jsonb,$15,NOW(),NOW())`,
 		pid, input.SKU, input.Name, input.Category, input.SubCategory, util.OrDef(input.Brand, "CUT-STOCK"), input.Description,
-		input.Price, input.Stock, util.OrDef(input.Unit, "NOS"), input.Featured, input.SortOrder, material, specsJSON,
+		input.Price, input.Stock, util.OrDef(input.Unit, "NOS"), input.Featured, input.SortOrder, material, specsJSON, input.LowStockThreshold,
 	)
 	if err != nil {
 		log.Printf("[admin] create product error: %v", err)
@@ -145,6 +151,65 @@ func writeProductAudit(r *http.Request, action, productID string) {
 	db.Pool.QueryRow(r.Context(), "SELECT sku,name FROM products WHERE id=$1", productID).Scan(&sku, &name)
 	adminID, _ := r.Context().Value(middleware.AdminIDKey).(string)
 	db.WriteAudit(r.Context(), &adminID, action, fmt.Sprintf("%s (%s)", sku, name), "OK", middleware.ClientIP(r), r.Header.Get("User-Agent"))
+}
+
+// activationBlockedReason returns why a product can't go active, or "" if
+// it's fine to activate. Requires both a real price and an uploaded image --
+// a product with neither shouldn't be sellable, and this is the one place
+// both the single-product and bulk activation paths check it, so the rule
+// can't drift between them. priceOverride is the price from the current
+// request body, if the caller is also changing it in the same call.
+func activationBlockedReason(ctx context.Context, productID string, priceOverride *float64) string {
+	var price float64
+	var imageURL *string
+	if err := db.Pool.QueryRow(ctx, "SELECT price, image_url FROM products WHERE id=$1", productID).Scan(&price, &imageURL); err != nil {
+		return "Product not found"
+	}
+	if priceOverride != nil {
+		price = *priceOverride
+	}
+	if price <= 0 && (imageURL == nil || *imageURL == "") {
+		return "Set a price and upload an image before activating this product"
+	}
+	if price <= 0 {
+		return "Set a price before activating this product"
+	}
+	if imageURL == nil || *imageURL == "" {
+		return "Upload an image before activating this product"
+	}
+	return ""
+}
+
+// HandleAdminProductsBulkActivate activates every selected product that
+// already has a price and an image, and reports which ones it skipped (and
+// why) so the admin can go fix just those instead of guessing.
+func HandleAdminProductsBulkActivate(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		IDs []string `json:"ids"`
+	}
+	if err := util.Decode(r, &input); err != nil || len(input.IDs) == 0 {
+		util.JsonErr(w, 400, "ids array required")
+		return
+	}
+	adminID, _ := r.Context().Value(middleware.AdminIDKey).(string)
+	ip, ua := middleware.ClientIP(r), r.Header.Get("User-Agent")
+
+	activated := 0
+	skipped := []map[string]string{}
+	for _, id := range input.IDs {
+		if reason := activationBlockedReason(r.Context(), id, nil); reason != "" {
+			var sku string
+			db.Pool.QueryRow(r.Context(), "SELECT sku FROM products WHERE id=$1", id).Scan(&sku)
+			skipped = append(skipped, map[string]string{"sku": sku, "reason": reason})
+			continue
+		}
+		db.Pool.Exec(r.Context(), "UPDATE products SET active=true, updated_at=NOW() WHERE id=$1", id)
+		writeProductAudit(r, "product_activate", id)
+		activated++
+	}
+	db.WriteAudit(r.Context(), &adminID, "bulk_product_activate", fmt.Sprintf("%d activated, %d skipped", activated, len(skipped)), "OK", ip, ua)
+	middleware.CacheDelPattern(r.Context(), "cache:products:*")
+	util.JsonOK(w, 200, map[string]interface{}{"activated": activated, "skipped": skipped})
 }
 
 // HandleAdminProductsBulkDelete permanently deletes multiple products at
@@ -241,14 +306,12 @@ func HandleAdminProduct(w http.ResponseWriter, r *http.Request) {
 		}
 		if v, ok := input["active"].(bool); ok {
 			if v {
-				effectivePrice := 0.0
+				var priceOverride *float64
 				if p, priceOk := input["price"].(float64); priceOk {
-					effectivePrice = p
-				} else {
-					db.Pool.QueryRow(r.Context(), "SELECT price FROM products WHERE id=$1", id).Scan(&effectivePrice)
+					priceOverride = &p
 				}
-				if effectivePrice <= 0 {
-					util.JsonErr(w, 400, "Set a price before activating this product")
+				if reason := activationBlockedReason(r.Context(), id, priceOverride); reason != "" {
+					util.JsonErr(w, 400, reason)
 					return
 				}
 			}
@@ -261,11 +324,29 @@ func HandleAdminProduct(w http.ResponseWriter, r *http.Request) {
 				addSet("material", v)
 			}
 		}
+		if raw, ok := input["lowStockThreshold"]; ok {
+			if raw == nil {
+				addSet("low_stock_threshold", nil) // explicit null clears it -- falls back to the global default
+			} else if v, ok := raw.(float64); ok {
+				addSet("low_stock_threshold", int(v))
+			}
+		}
 		if v, ok := input["specifications"]; ok {
 			specsJSON, _ := json.Marshal(v)
 			sets = append(sets, fmt.Sprintf("specifications=$%d::jsonb", idx))
 			args = append(args, specsJSON)
 			idx++
+		}
+		if remove, _ := input["removeImage"].(bool); remove {
+			var oldURL *string
+			db.Pool.QueryRow(r.Context(), "SELECT image_url FROM products WHERE id=$1", id).Scan(&oldURL)
+			if oldURL != nil && *oldURL != "" {
+				if key := keyFromURL(*oldURL); key != "" {
+					storage.Active.Delete(r.Context(), key)
+				}
+			}
+			addSet("image_url", nil)
+			sets = append(sets, "image_type='PLACEHOLDER'", "active=false") // can't stay active with no image
 		}
 		sets = append(sets, "updated_at=NOW()")
 		args = append(args, id)
