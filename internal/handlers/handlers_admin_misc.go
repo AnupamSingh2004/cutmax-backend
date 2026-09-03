@@ -41,6 +41,7 @@ func HandleAdminSettings(w http.ResponseWriter, r *http.Request) {
 func HandleAdminStats(w http.ResponseWriter, r *http.Request) {
 	var k struct {
 		TotalProducts   int `json:"totalProducts"`
+		ActiveProducts  int `json:"activeProducts"`
 		StockUnits      int `json:"stockUnits"`
 		StockValue      int `json:"stockValue"`
 		TotalEnquiries  int `json:"totalEnquiries"`
@@ -48,20 +49,24 @@ func HandleAdminStats(w http.ResponseWriter, r *http.Request) {
 		LowStockCount   int `json:"lowStockCount"`
 		OutOfStockCount int `json:"outOfStockCount"`
 	}
-	db.Pool.QueryRow(r.Context(), "SELECT COUNT(*) FROM products WHERE active=true").Scan(&k.TotalProducts)
-	db.Pool.QueryRow(r.Context(), "SELECT COALESCE(SUM(stock),0) FROM products WHERE active=true").Scan(&k.StockUnits)
-	db.Pool.QueryRow(r.Context(), "SELECT COALESCE(SUM(stock*price)::int,0) FROM products WHERE active=true").Scan(&k.StockValue)
+	// Counts span the whole catalog (matching the Products list), not just
+	// active listings -- most products stay inactive until priced and
+	// photographed, so an active-only count reads as "0 products" here.
+	db.Pool.QueryRow(r.Context(), "SELECT COUNT(*) FROM products").Scan(&k.TotalProducts)
+	db.Pool.QueryRow(r.Context(), "SELECT COUNT(*) FROM products WHERE active=true").Scan(&k.ActiveProducts)
+	db.Pool.QueryRow(r.Context(), "SELECT COALESCE(SUM(stock),0) FROM products").Scan(&k.StockUnits)
+	db.Pool.QueryRow(r.Context(), "SELECT COALESCE(SUM(stock*price)::int,0) FROM products").Scan(&k.StockValue)
 	db.Pool.QueryRow(r.Context(), "SELECT COUNT(*) FROM enquiries").Scan(&k.TotalEnquiries)
 	db.Pool.QueryRow(r.Context(), "SELECT COUNT(*) FROM enquiries WHERE status='NEW'").Scan(&k.NewEnquiries)
 
 	var lowLimit int
 	db.Pool.QueryRow(r.Context(), "SELECT COALESCE(value::int,10) FROM settings WHERE key='low_stock_limit'").Scan(&lowLimit)
-	db.Pool.QueryRow(r.Context(), "SELECT COUNT(*) FROM products WHERE active=true AND stock>0 AND stock<=$1", lowLimit).Scan(&k.LowStockCount)
-	db.Pool.QueryRow(r.Context(), "SELECT COUNT(*) FROM products WHERE active=true AND stock=0").Scan(&k.OutOfStockCount)
+	db.Pool.QueryRow(r.Context(), "SELECT COUNT(*) FROM products WHERE stock>0 AND stock<=$1", lowLimit).Scan(&k.LowStockCount)
+	db.Pool.QueryRow(r.Context(), "SELECT COUNT(*) FROM products WHERE stock=0").Scan(&k.OutOfStockCount)
 
 	stockBySubCategory := []map[string]interface{}{}
 	rows, _ := db.Pool.Query(r.Context(),
-		"SELECT sub_category, COALESCE(SUM(stock),0) FROM products WHERE active=true GROUP BY sub_category ORDER BY 2 DESC LIMIT 12")
+		"SELECT sub_category, COALESCE(SUM(stock),0) FROM products GROUP BY sub_category ORDER BY 2 DESC LIMIT 12")
 	for rows.Next() {
 		var sub string
 		var stock int
@@ -75,7 +80,7 @@ func HandleAdminStats(w http.ResponseWriter, r *http.Request) {
 		SELECT
 			CASE WHEN stock=0 THEN 'Out of Stock' WHEN stock<=$1 THEN 'Low Stock' ELSE 'In Stock' END AS status,
 			COUNT(*), COALESCE(SUM(stock*price),0)::int
-		FROM products WHERE active=true GROUP BY 1`, lowLimit)
+		FROM products GROUP BY 1`, lowLimit)
 	for rows.Next() {
 		var status string
 		var count, value int

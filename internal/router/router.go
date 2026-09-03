@@ -87,6 +87,7 @@ func New() http.Handler {
 		r.Delete("/api/admin/price-tiers/{id}", handlers.HandleAdminTier)
 		r.Get("/api/admin/enquiries", handlers.HandleAdminEnquiries)
 		r.Get("/api/admin/enquiries/{id}", handlers.HandleAdminEnquiry)
+		r.Get("/api/admin/enquiries/{id}/pdf", handlers.HandleAdminEnquiryPDF)
 		r.Put("/api/admin/enquiries/{id}", handlers.HandleAdminEnquiry)
 		r.Delete("/api/admin/enquiries/{id}", handlers.HandleAdminEnquiry)
 		r.Get("/api/admin/settings", handlers.HandleAdminSettings)
