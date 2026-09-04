@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -97,6 +98,17 @@ func HandleBulkProducts(w http.ResponseWriter, r *http.Request) {
 		if brand == "" {
 			brand = "CUT-STOCK"
 		}
+		category, subCategory, material, needsReview := normalizeTaxonomy(rec["category"], rec["subCategory"])
+		if needsReview {
+			errors = append(errors, map[string]interface{}{
+				"row": i + 2, "sku": sku,
+				"error": fmt.Sprintf("Unrecognized category/subCategory (%q / %q) -- used as-is, please double check", rec["category"], rec["subCategory"]),
+			})
+		}
+		var materialPtr *string
+		if material != "" {
+			materialPtr = &material
+		}
 		var existingID string
 		err := db.Pool.QueryRow(r.Context(), "SELECT id FROM products WHERE sku=$1", sku).Scan(&existingID)
 		if err == pgx.ErrNoRows {
@@ -105,8 +117,8 @@ func HandleBulkProducts(w http.ResponseWriter, r *http.Request) {
 			// (or the regular edit form), so half-finished imports can't go live
 			// with a placeholder image.
 			_, err = db.Pool.Exec(r.Context(),
-				`INSERT INTO products (id,sku,name,category,sub_category,brand,description,price,stock,unit,active,created_at,updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,false,NOW(),NOW())`,
-				uuid.New().String(), sku, rec["name"], rec["category"], rec["subCategory"], brand, rec["description"], price, stock, util.OrDef(rec["unit"], "NOS"))
+				`INSERT INTO products (id,sku,name,category,sub_category,brand,description,price,stock,unit,material,active,created_at,updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,false,NOW(),NOW())`,
+				uuid.New().String(), sku, rec["name"], category, subCategory, brand, rec["description"], price, stock, util.OrDef(rec["unit"], "NOS"), materialPtr)
 			if err != nil {
 				errors = append(errors, map[string]interface{}{"row": i + 2, "sku": sku, "error": err.Error()})
 				skipped++
@@ -114,8 +126,8 @@ func HandleBulkProducts(w http.ResponseWriter, r *http.Request) {
 				inserted++
 			}
 		} else {
-			_, err = db.Pool.Exec(r.Context(), "UPDATE products SET name=$1,category=$2,sub_category=$3,brand=$4,price=$5,stock=$6,updated_at=NOW() WHERE sku=$7",
-				rec["name"], rec["category"], rec["subCategory"], brand, price, stock, sku)
+			_, err = db.Pool.Exec(r.Context(), "UPDATE products SET name=$1,category=$2,sub_category=$3,brand=$4,price=$5,stock=$6,material=COALESCE($7,material),updated_at=NOW() WHERE sku=$8",
+				rec["name"], category, subCategory, brand, price, stock, materialPtr, sku)
 			if err != nil {
 				errors = append(errors, map[string]interface{}{"row": i + 2, "sku": sku, "error": err.Error()})
 				skipped++
@@ -140,12 +152,62 @@ func HandleBulkProducts(w http.ResponseWriter, r *http.Request) {
 // HandleBulkProducts.
 
 var stockHeaderAliases = map[string][]string{
-	"name":        {"item", "name", "product", "productname", "itemname"},
-	"category":    {"category", "cotegry", "categry", "cat"},
-	"subCategory": {"subcategory", "subcotegry", "subcat", "subcategry"},
-	"brand":       {"brand", "make"},
-	"stock":       {"qty", "quantity", "stock", "stockqty"},
-	"sku":         {"sku", "code", "itemcode"},
+	"name":              {"item", "name", "product", "productname", "itemname"},
+	"category":          {"category", "cotegry", "categry", "cat"},
+	"subCategory":       {"subcategory", "subcotegry", "subcat", "subcategry"},
+	"brand":             {"brand", "make"},
+	"stock":             {"qty", "quantity", "stock", "stockqty"},
+	"sku":               {"sku", "code", "itemcode"},
+	"material":          {"material", "grade"},
+	"description":       {"description", "desc"},
+	"price":             {"price", "rate", "unitprice", "mrp"},
+	"unit":              {"unit", "uom"},
+	"featured":          {"featured"},
+	"sortOrder":         {"sortorder", "order", "position", "displayorder"},
+	"lowStockThreshold": {"lowstockthreshold", "lowstock", "reorderlevel", "reorderpoint"},
+	"specifications":    {"specifications", "specs", "spec"},
+}
+
+// parseBoolCell reads a spreadsheet cell as a boolean -- "TRUE"/"YES"/"Y"/"1"
+// (case-insensitive) count as true, everything else (including blank) as false.
+func parseBoolCell(s string) bool {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "true", "yes", "y", "1":
+		return true
+	default:
+		return false
+	}
+}
+
+type specPair struct {
+	Label string `json:"label"`
+	Value string `json:"value"`
+}
+
+// parseSpecificationsCell reads a flat "Label: Value | Label2: Value2" cell
+// into the same {label,value}[] shape the admin edit form's specifications
+// table stores as JSON -- a spreadsheet has no room for a nested table, so
+// this is the one-cell encoding for it.
+func parseSpecificationsCell(s string) []byte {
+	var specs []specPair
+	for _, part := range strings.Split(s, "|") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		kv := strings.SplitN(part, ":", 2)
+		if len(kv) != 2 {
+			continue
+		}
+		label := strings.TrimSpace(kv[0])
+		value := strings.TrimSpace(kv[1])
+		if label == "" || value == "" {
+			continue
+		}
+		specs = append(specs, specPair{Label: label, Value: value})
+	}
+	b, _ := json.Marshal(specs)
+	return b
 }
 
 func normalizeStockHeader(h string) string {
@@ -224,9 +286,11 @@ func HandleBulkStock(w http.ResponseWriter, r *http.Request) {
 
 	existing := db.LoadAllProducts(r.Context())
 	byName := map[string]*db.ProductRow{}
+	bySKU := map[string]*db.ProductRow{}
 	nextSKU := 1
 	for i := range existing {
 		byName[strings.ToLower(strings.TrimSpace(existing[i].Name))] = &existing[i]
+		bySKU[strings.ToUpper(strings.TrimSpace(existing[i].SKU))] = &existing[i]
 		var n int
 		if _, err := fmt.Sscanf(existing[i].SKU, "CT-%d", &n); err == nil && n >= nextSKU {
 			nextSKU = n + 1
@@ -236,17 +300,117 @@ func HandleBulkStock(w http.ResponseWriter, r *http.Request) {
 	updated, created, skipped := 0, 0, 0
 	createdSKUs := []map[string]string{}
 	errs := []map[string]interface{}{}
+	warnings := []map[string]interface{}{}
 
 	for i, row := range rows[1:] {
 		name := get(row, "name")
-		if name == "" {
+		skuVal := get(row, "sku")
+		if name == "" && skuVal == "" {
 			skipped++
 			continue
 		}
-		stock, _ := strconv.Atoi(strings.TrimSpace(get(row, "stock")))
 
-		if p, found := byName[strings.ToLower(name)]; found {
-			if _, err := db.Pool.Exec(r.Context(), "UPDATE products SET stock=$1,updated_at=NOW() WHERE id=$2", stock, p.ID); err != nil {
+		var existingProduct *db.ProductRow
+		if skuVal != "" {
+			existingProduct = bySKU[strings.ToUpper(skuVal)]
+		}
+		if existingProduct == nil && name != "" {
+			existingProduct = byName[strings.ToLower(name)]
+		}
+
+		rawCategory := get(row, "category")
+		rawSubCategory := get(row, "subCategory")
+		rawBrand := get(row, "brand")
+		rawMaterial := get(row, "material")
+		rawDescription := get(row, "description")
+		rawPrice := get(row, "price")
+		rawStock := get(row, "stock")
+		rawUnit := get(row, "unit")
+		rawFeatured := get(row, "featured")
+		rawSortOrder := get(row, "sortOrder")
+		rawLowStock := get(row, "lowStockThreshold")
+		rawSpecs := get(row, "specifications")
+
+		warn := func(field, value string) {
+			warnings = append(warnings, map[string]interface{}{
+				"row": i + 2, "name": name, "sku": skuVal, "field": field, "value": value,
+				"message": "Not a recognized " + field + " -- used as-is, please double check",
+			})
+		}
+
+		if existingProduct != nil {
+			sets := []string{}
+			args := []interface{}{}
+			idx := 1
+			addSet := func(col string, val interface{}) {
+				sets = append(sets, fmt.Sprintf("%s=$%d", col, idx))
+				args = append(args, val)
+				idx++
+			}
+			if name != "" {
+				addSet("name", name)
+			}
+			if rawCategory != "" {
+				category, subCategory, material, needsReview := normalizeTaxonomy(rawCategory, rawSubCategory)
+				addSet("category", category)
+				addSet("sub_category", subCategory)
+				if rawMaterial != "" {
+					addSet("material", rawMaterial)
+				} else if material != "" {
+					addSet("material", material)
+				}
+				if needsReview {
+					warn("category/subCategory", rawCategory+" / "+rawSubCategory)
+				}
+			} else if rawMaterial != "" {
+				addSet("material", rawMaterial)
+			}
+			if rawBrand != "" {
+				addSet("brand", rawBrand)
+			}
+			if rawDescription != "" {
+				addSet("description", rawDescription)
+			}
+			if rawPrice != "" {
+				if price, err := strconv.ParseFloat(rawPrice, 64); err == nil {
+					addSet("price", price)
+				}
+			}
+			if rawStock != "" {
+				if stock, err := strconv.Atoi(rawStock); err == nil {
+					addSet("stock", stock)
+				}
+			}
+			if rawUnit != "" {
+				addSet("unit", rawUnit)
+			}
+			if rawFeatured != "" {
+				addSet("featured", parseBoolCell(rawFeatured))
+			}
+			if rawSortOrder != "" {
+				if so, err := strconv.Atoi(rawSortOrder); err == nil {
+					addSet("sort_order", so)
+				}
+			}
+			if rawLowStock != "" {
+				if ls, err := strconv.Atoi(rawLowStock); err == nil {
+					addSet("low_stock_threshold", ls)
+				}
+			}
+			if rawSpecs != "" {
+				sets = append(sets, fmt.Sprintf("specifications=$%d::jsonb", idx))
+				args = append(args, parseSpecificationsCell(rawSpecs))
+				idx++
+			}
+
+			if len(sets) == 0 {
+				skipped++
+				continue
+			}
+			sets = append(sets, "updated_at=NOW()")
+			args = append(args, existingProduct.ID)
+			query := fmt.Sprintf("UPDATE products SET %s WHERE id=$%d", strings.Join(sets, ","), idx)
+			if _, err := db.Pool.Exec(r.Context(), query, args...); err != nil {
 				errs = append(errs, map[string]interface{}{"row": i + 2, "name": name, "error": err.Error()})
 				skipped++
 				continue
@@ -255,14 +419,49 @@ func HandleBulkStock(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		sku := fmt.Sprintf("CT-%05d", nextSKU)
-		nextSKU++
-		category := util.OrDef(get(row, "category"), "Uncategorized")
-		subCategory := util.OrDef(get(row, "subCategory"), "General")
-		brand := util.OrDef(get(row, "brand"), "CUT-STOCK")
+		if name == "" {
+			// A bare SKU with no matching existing product and no name can't
+			// create a new row.
+			skipped++
+			continue
+		}
+
+		sku := skuVal
+		if sku == "" {
+			sku = fmt.Sprintf("CT-%05d", nextSKU)
+			nextSKU++
+		}
+		category, subCategory, material, needsReview := normalizeTaxonomy(rawCategory, rawSubCategory)
+		if rawMaterial != "" {
+			material = rawMaterial
+		}
+		if needsReview {
+			warn("category/subCategory", rawCategory+" / "+rawSubCategory)
+		}
+		category = util.OrDef(category, "Uncategorized")
+		subCategory = util.OrDef(subCategory, "General")
+		brand := util.OrDef(rawBrand, "CUT-STOCK")
+		unit := util.OrDef(rawUnit, "NOS")
+		var materialPtr *string
+		if material != "" {
+			materialPtr = &material
+		}
+		var lowStockPtr *int
+		if rawLowStock != "" {
+			if ls, err := strconv.Atoi(rawLowStock); err == nil {
+				lowStockPtr = &ls
+			}
+		}
+		stock, _ := strconv.Atoi(rawStock)
+		price, _ := strconv.ParseFloat(rawPrice, 64)
+		sortOrder, _ := strconv.Atoi(rawSortOrder)
+		featured := parseBoolCell(rawFeatured)
+
 		if _, err := db.Pool.Exec(r.Context(),
-			`INSERT INTO products (id,sku,name,category,sub_category,brand,description,price,stock,unit,active,created_at,updated_at) VALUES ($1,$2,$3,$4,$5,$6,'',0,$7,'NOS',false,NOW(),NOW())`,
-			uuid.New().String(), sku, name, category, subCategory, brand, stock); err != nil {
+			`INSERT INTO products (id,sku,name,category,sub_category,brand,description,price,stock,unit,featured,active,sort_order,material,specifications,low_stock_threshold,created_at,updated_at)
+			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,false,$12,$13,$14::jsonb,$15,NOW(),NOW())`,
+			uuid.New().String(), sku, name, category, subCategory, brand, rawDescription, price, stock, unit, featured, sortOrder, materialPtr, parseSpecificationsCell(rawSpecs), lowStockPtr,
+		); err != nil {
 			errs = append(errs, map[string]interface{}{"row": i + 2, "name": name, "error": err.Error()})
 			skipped++
 			continue
@@ -274,7 +473,7 @@ func HandleBulkStock(w http.ResponseWriter, r *http.Request) {
 	writeBulkAudit(r, "bulk_stock_import", fmt.Sprintf("%d updated, %d created, %d skipped", updated, created, skipped))
 	util.JsonOK(w, 200, map[string]interface{}{
 		"updated": updated, "created": created, "skipped": skipped,
-		"createdProducts": createdSKUs, "errors": errs,
+		"createdProducts": createdSKUs, "errors": errs, "warnings": warnings,
 	})
 }
 
